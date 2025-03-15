@@ -1,0 +1,62 @@
+Sorting returns with large splits of the same unit over time. 3-14-2025
+They are kept separate by isi violations (presumably)
+
+Two possibilities:
+	1. threshold too low (13, 9)? maybe a (13,10) or even (14,10) would be better
+	2. catgt style alignment failed?
+	
+Solutions:
+	1. Firing rates look ok, thresholds don't seem crazy
+	2. How can I check this?? Looks like it at least ran successfully
+	3. Curation module for identifying merges
+	
+	
+Doing: commented out code referring to NHP probes (it shouldn't have been used anyway)
+	set phase align correction shifts to before saturation removal
+	
+	
+Other issues:
+	1. Find peaks in motion correction took waaaay too long, no paralellisation
+		correct_motion.detect_peaks -> spikeinterface.sortingcomponents.peak_detection 
+		def detect_peaks(
+		    recording,
+		    method="locally_exclusive", # maybe try locally_exclusive_torch  to call DetectPeakLocallyExclusiveTorch
+		    pipeline_nodes=None,
+		    gather_mode="memory",
+		    folder=None,
+		    names=None,
+		    skip_after_n_peaks=None,
+		    recording_slices=None,
+		    **kwargs,
+		):
+		    default_detect_peak_args = dict(
+        		method = 'locally_exclusive_torch',  #'locally_exclusive', #
+       			radius_um = 100, # this might have been chosen for NHP probe, default 50  +> changing back
+        		detect_threshold=7 #default was 5
+    			)
+	2. *faiss was run on cpu, need to install gpu version? 
+	3. *conda install pynvml
+	4. Kilosort(?) recalcs some parameters from data: 
+		Extracting spikes using templates
+		Re-computing universal templates from data.
+		Number of universal templates:1532
+		Detecting spikes...
+		(this takes forever!) unclear why this is even being recalculated or where its being called
+		kilosort4
+			run_kilosort.py
+				detect_spikes 
+				spikedetect.py (Spikedetection), 
+					we could switch to prebuilt templates, or fewer templates 1532
+					unclear why these are needed/recomputed
+				12965059 spikes det in 3040s (50mins)
+				
+				
+Alternative solutions:
+	Parameters for merging clusters
+		'acg_threshold' (0.2) -> allowable refract violations in autocorr gram for 'good' unit
+		'ccg_threshold' (0.25)-> allowable refract violations in crosscorr gram for splits and merges
+			This could be increased for this dataset given the temporal tradeoffs
+	
+	
+	
+Write binary now takes forever, probably need to reduce batch durations in preprocess from 2 to 1? Ensure parallelisation

@@ -11,9 +11,12 @@ from spikeinterface.sortingcomponents.motion import estimate_motion, motion_util
 from spikeinterface.preprocessing import astype
 from scipy.signal import medfilt
 
+from spikeinterface.core.motion import Motion
+
 def correct_motion(seg, cache_dir, detect_peak_args={}, localize_peak_args={}, ks_motion_args={}, dc_motion_args={}, med_motion_args={}, job_kwargs={}, recalc=False, method='med', median_filter_size=1):
 
     print('Starting motion correction...')
+
 
     if isinstance(cache_dir, str):
         cache_dir = Path(cache_dir)
@@ -26,9 +29,9 @@ def correct_motion(seg, cache_dir, detect_peak_args={}, localize_peak_args={}, k
     ###
 
     default_detect_peak_args = dict(
-        method = 'locally_exclusive', 
-        radius_um = 100, 
-        detect_threshold=7
+        method = 'locally_exclusive',  #'locally_exclusive', # replace with locally_exclusive_torch to use DetectPeakLocallyExclusiveTorch ???
+        radius_um = 50, #was 100, possibly for the nhp probes, resetting to default 
+        detect_threshold=5 #7
     )
     detect_peak_args = dict(default_detect_peak_args, **detect_peak_args)
 
@@ -57,120 +60,128 @@ def correct_motion(seg, cache_dir, detect_peak_args={}, localize_peak_args={}, k
     # Kilosort motion
     ###
 
-    print('Estimating Kilosort-like motion...')
+    if method == 'ks' or method == 'all':
+        print('Estimating Kilosort-like motion...')
 
-    default_ks_motion_args = dict(method = 'iterative_template', direction = 'y', bin_s = 2.0, num_shifts_block = 5)
-    ks_motion_args = dict(default_ks_motion_args, **ks_motion_args)
-    ks_motion_args['method'] = 'iterative_template'
+        default_ks_motion_args = dict(method = 'iterative_template', direction = 'y', bin_s = 2.0, num_shifts_block = 5)
+        ks_motion_args = dict(default_ks_motion_args, **ks_motion_args)
+        ks_motion_args['method'] = 'iterative_template'
 
-    ks_motion_dir = cache_dir / 'ks-motion'
-    ks_motion_dir.mkdir(parents=True, exist_ok=True)
-    if not (ks_motion_dir / "motion.npy").exists() or recalc:
-        ks_motion = estimate_motion(
-            recording = seg, 
-            peaks = peaks,
-            peak_locations = peak_locations,
-            **ks_motion_args 
+        ks_motion_dir = cache_dir / 'ks-motion'
+        ks_motion_dir.mkdir(parents=True, exist_ok=True)
+        if not (ks_motion_dir / "motion.npy").exists() or recalc:
+            ks_motion = estimate_motion(
+                recording = seg, 
+                peaks = peaks,
+                peak_locations = peak_locations,
+                **ks_motion_args 
+            )
+            ks_displacement = ks_motion.displacement[0]
+            if median_filter_size > 1:
+                ks_displacement = medfilt(ks_displacement, kernel_size=(median_filter_size, 1))
+
+            np.save(ks_motion_dir / "motion.npy", ks_displacement)
+            np.save(ks_motion_dir / "time_bins.npy", ks_motion.temporal_bins_s[0])
+            np.save(ks_motion_dir / "depth_bins.npy", ks_motion.spatial_bins_um)
+
+        # load kilosort motion
+        ks_motion = Motion(
+            displacement=np.load(ks_motion_dir / "motion.npy"),
+            temporal_bins_s=np.load(ks_motion_dir / "time_bins.npy"),
+            spatial_bins_um=np.load(ks_motion_dir / "depth_bins.npy"),
         )
-        ks_displacement = ks_motion.displacement[0]
-        if median_filter_size > 1:
-            ks_displacement = medfilt(ks_displacement, kernel_size=(median_filter_size, 1))
-
-        np.save(ks_motion_dir / "motion.npy", ks_displacement)
-        np.save(ks_motion_dir / "time_bins.npy", ks_motion.temporal_bins_s[0])
-        np.save(ks_motion_dir / "depth_bins.npy", ks_motion.spatial_bins_um)
-
-    # load kilosort motion
-    ks_motion = motion_utils.Motion(
-        displacement=np.load(ks_motion_dir / "motion.npy"),
-        temporal_bins_s=np.load(ks_motion_dir / "time_bins.npy"),
-        spatial_bins_um=np.load(ks_motion_dir / "depth_bins.npy"),
-    )
-    
+        if method != 'all':
+            motion = ks_motion
+        
+        
     ###
     # Varol2021 decentralized motion
     ###
+    if method == 'dc' or method == 'all':
+        print('Estimating decentralized motion...')
 
-    print('Estimating decentralized motion...')
+        default_dc_motion_args = dict(method = 'decentralized', direction = 'y', bin_s = 2.0)
+        dc_motion_args = dict(default_dc_motion_args, **dc_motion_args)
 
-    default_dc_motion_args = dict(method = 'decentralized', direction = 'y', bin_s = 2.0)
-    dc_motion_args = dict(default_dc_motion_args, **dc_motion_args)
+        decentralized_motion_dir = cache_dir / 'decentralized-motion'
+        decentralized_motion_dir.mkdir(parents=True, exist_ok=True)
+        if not (decentralized_motion_dir / "motion.npy").exists() or recalc:
+            dc_motion = estimate_motion(
+                recording = seg, 
+                peaks = peaks,
+                peak_locations = peak_locations,
+                **dc_motion_args
+            )
+            dc_displacement = dc_motion.displacement[0]
+            if median_filter_size > 1:
+                dc_displacement = medfilt(dc_displacement, kernel_size=(median_filter_size, 1))
+            np.save(decentralized_motion_dir / "motion.npy", dc_displacement)
+            np.save(decentralized_motion_dir / "time_bins.npy", dc_motion.temporal_bins_s[0])
+            np.save(decentralized_motion_dir / "depth_bins.npy", dc_motion.spatial_bins_um)
 
-    decentralized_motion_dir = cache_dir / 'decentralized-motion'
-    decentralized_motion_dir.mkdir(parents=True, exist_ok=True)
-    if not (decentralized_motion_dir / "motion.npy").exists() or recalc:
-        dc_motion = estimate_motion(
-            recording = seg, 
-            peaks = peaks,
-            peak_locations = peak_locations,
-            **dc_motion_args
+        # load decentralized motion
+        dc_motion = Motion(
+            displacement=np.load(decentralized_motion_dir / "motion.npy"),
+            temporal_bins_s=np.load(decentralized_motion_dir / "time_bins.npy"),
+            spatial_bins_um=np.load(decentralized_motion_dir / "depth_bins.npy"),
         )
-        dc_displacement = dc_motion.displacement[0]
-        if median_filter_size > 1:
-            dc_displacement = medfilt(dc_displacement, kernel_size=(median_filter_size, 1))
-        np.save(decentralized_motion_dir / "motion.npy", dc_displacement)
-        np.save(decentralized_motion_dir / "time_bins.npy", dc_motion.temporal_bins_s[0])
-        np.save(decentralized_motion_dir / "depth_bins.npy", dc_motion.spatial_bins_um)
-
-    # load decentralized motion
-    dc_motion = motion_utils.Motion(
-        displacement=np.load(decentralized_motion_dir / "motion.npy"),
-        temporal_bins_s=np.load(decentralized_motion_dir / "time_bins.npy"),
-        spatial_bins_um=np.load(decentralized_motion_dir / "depth_bins.npy"),
-    )
+        if method != 'all':
+            motion = dc_motion
 
     ###
     # MEDiCINe motion
     ###
+    if method == 'med' or method == 'all':
+        print('Estimating MEDiCINe motion...')
 
-    print('Estimating MEDiCINe motion...')
+        default_med_motion_args = dict(time_bin_size = 2.0, num_depth_bins = 2)
+        med_motion_args = dict(default_med_motion_args, **med_motion_args)
 
-    default_med_motion_args = dict(time_bin_size = 2.0, num_depth_bins = 2)
-    med_motion_args = dict(default_med_motion_args, **med_motion_args)
+        # Create directory to store MEDiCINe outputs for this recording
+        medicine_output_dir = cache_dir / 'medicine'
+        medicine_output_dir.mkdir(parents=True, exist_ok=True)
+        if not (medicine_output_dir / "motion.npy").exists() or recalc:
+            medicine.run_medicine(
+                peak_amplitudes=peaks['amplitude'],
+                peak_depths=peak_locations['y'],
+                peak_times=peaks['sample_index'] / seg.get_sampling_frequency() + seg.get_time_info()['t_start'],
+                output_dir=medicine_output_dir,
+                **med_motion_args
+            )
 
-    # Create directory to store MEDiCINe outputs for this recording
-    medicine_output_dir = cache_dir / 'medicine'
-    medicine_output_dir.mkdir(parents=True, exist_ok=True)
-    if not (medicine_output_dir / "motion.npy").exists() or recalc:
-        medicine.run_medicine(
-            peak_amplitudes=peaks['amplitude'],
-            peak_depths=peak_locations['y'],
-            peak_times=peaks['sample_index'] / seg.get_sampling_frequency() + seg.get_time_info()['t_start'],
-            output_dir=medicine_output_dir,
-            **med_motion_args
-        )
+            # Load MEDiCINe outputs
+            med_motion = np.load(medicine_output_dir / "motion.npy")
+            med_time_bins = np.load(medicine_output_dir / "time_bins.npy")
+            med_depth_bins = np.load(medicine_output_dir / "depth_bins.npy")
+            n_append = 5
+            dt = med_time_bins[1] - med_time_bins[0]
+            med_time_bins = np.concatenate(
+                    [med_time_bins, med_time_bins[-1] + np.arange(1, n_append + 1) * dt]
+            )
+            med_motion = np.concatenate(
+                [med_motion, np.ones((n_append, med_motion.shape[1])) * med_motion[-1]]
+            )
+            if median_filter_size > 1:
+                med_motion = medfilt(med_motion, kernel_size=(median_filter_size, 1))
+            np.save(medicine_output_dir / "motion.npy", med_motion)
+            np.save(medicine_output_dir / "time_bins.npy", med_time_bins)
+            np.save(medicine_output_dir / "depth_bins.npy", med_depth_bins)
 
         # Load MEDiCINe outputs
-        med_motion = np.load(medicine_output_dir / "motion.npy")
-        med_time_bins = np.load(medicine_output_dir / "time_bins.npy")
-        med_depth_bins = np.load(medicine_output_dir / "depth_bins.npy")
-        n_append = 5
-        dt = med_time_bins[1] - med_time_bins[0]
-        med_time_bins = np.concatenate(
-                [med_time_bins, med_time_bins[-1] + np.arange(1, n_append + 1) * dt]
+        med_motion = Motion( 
+            displacement=np.load(medicine_output_dir / "motion.npy"),
+            temporal_bins_s=np.load(medicine_output_dir / "time_bins.npy"),
+            spatial_bins_um=np.load(medicine_output_dir / "depth_bins.npy"),
         )
-        med_motion = np.concatenate(
-            [med_motion, np.ones((n_append, med_motion.shape[1])) * med_motion[-1]]
-        )
-        if median_filter_size > 1:
-            med_motion = medfilt(med_motion, kernel_size=(median_filter_size, 1))
-        np.save(medicine_output_dir / "motion.npy", med_motion)
-        np.save(medicine_output_dir / "time_bins.npy", med_time_bins)
-        np.save(medicine_output_dir / "depth_bins.npy", med_depth_bins)
-
-    # Load MEDiCINe outputs
-    med_motion = motion_utils.Motion( 
-        displacement=np.load(medicine_output_dir / "motion.npy"),
-        temporal_bins_s=np.load(medicine_output_dir / "time_bins.npy"),
-        spatial_bins_um=np.load(medicine_output_dir / "depth_bins.npy"),
-    )
+        if method != 'all':
+            motion = med_motion
 
     # Interpolate motion using MEDiCINe
-    motion = med_motion
-    if method == 'ks':
-        motion = ks_motion
-    if method == 'dc':
-        motion = dc_motion
+    #motion = med_motion
+    #if method == 'ks':
+    #    motion = ks_motion
+    #if method == 'dc':
+    #    motion = dc_motion
 
     seg_sort = astype(interpolate_motion(astype(seg, "float"), motion, border_mode='force_zeros'), "int16")
 
@@ -199,21 +210,33 @@ def plot_motion_output(seg, cache_dir, save_dir=None, plot_stride=30, uV_per_bit
 
     peaks = np.load(cache_dir / 'peaks.npy')
     peak_locations = np.load(cache_dir / 'peak_locations.npy')
-    ks_motion = motion_utils.Motion(
-        displacement=np.load(cache_dir / "ks-motion/motion.npy")[0],
-        temporal_bins_s=np.load(cache_dir / "ks-motion/time_bins.npy")[0],
-        spatial_bins_um=np.load(cache_dir / "ks-motion/depth_bins.npy"),
-    )
-    dc_motion = motion_utils.Motion(
-        displacement=np.load(cache_dir / "decentralized-motion/motion.npy")[0],
-        temporal_bins_s=np.load(cache_dir / "decentralized-motion/time_bins.npy")[0],
-        spatial_bins_um=np.load(cache_dir / "decentralized-motion/depth_bins.npy"),
-    )
-    med_motion = motion_utils.Motion(
-        displacement=np.load(cache_dir / "medicine/motion.npy"),
-        temporal_bins_s=np.load(cache_dir / "medicine/time_bins.npy"),
-        spatial_bins_um=np.load(cache_dir / "medicine/depth_bins.npy"),
-    )
+    ks_loc= (cache_dir / 'ks-motion')
+    dc_loc = (cache_dir / 'decentralized-motion')
+    med_loc = (cache_dir / 'medicine')
+    if ks_loc.exists():
+        ks_motion = Motion(
+            displacement=np.load(cache_dir / "ks-motion/motion.npy"),
+            temporal_bins_s=np.load(cache_dir / "ks-motion/time_bins.npy"),
+            spatial_bins_um=np.load(cache_dir / "ks-motion/depth_bins.npy"),
+        )
+        method = 'ks'
+    if dc_loc.exists():
+        dc_motion = Motion(
+            displacement=np.load(cache_dir / "decentralized-motion/motion.npy"),
+            temporal_bins_s=np.load(cache_dir / "decentralized-motion/time_bins.npy"),
+            spatial_bins_um=np.load(cache_dir / "decentralized-motion/depth_bins.npy"),
+        )
+        method = 'dc'
+    if med_loc.exists():
+        med_motion = Motion(
+            displacement=np.load(cache_dir / "medicine/motion.npy"),
+            temporal_bins_s=np.load(cache_dir / "medicine/time_bins.npy"),
+            spatial_bins_um=np.load(cache_dir / "medicine/depth_bins.npy"),
+        )
+        method = 'med'
+    if ks_loc.exists() and dc_loc.exists() and med_loc.exists():
+        method = 'all'
+    
 
     spike_samples = peaks['sample_index']
     spike_times = spike_samples / seg.get_sampling_frequency() + seg.get_time_info()['t_start']
@@ -249,12 +272,11 @@ def plot_motion_output(seg, cache_dir, save_dir=None, plot_stride=30, uV_per_bit
     fig.savefig(save_dir / 'depth_raster.png')
 
     #
-    # Plot motion estiamte comparison
+    # Plot motion estimate comparison
     #
 
-
-    depth = ks_motion.spatial_bins_um[0]
-    times = ks_motion.temporal_bins_s[0]
+    depth = med_motion.spatial_bins_um[0]
+    times = med_motion.temporal_bins_s[0]
 
     probe = seg.get_probe()
     d_min = np.min(probe.contact_positions[:, 1])
@@ -269,16 +291,22 @@ def plot_motion_output(seg, cache_dir, save_dir=None, plot_stride=30, uV_per_bit
     for i, depth in enumerate(depths):
 
         dist = (d_max - depth)
-        ks_motion_interp = ks_motion.get_displacement_at_time_and_depth(times, np.ones(len(times)) * dist)
-        ks_motion_depths[:,n_depths-i-1] = ks_motion_interp
-        dc_motion_interp = dc_motion.get_displacement_at_time_and_depth(times, np.ones(len(times)) * dist)
-        dc_motion_depths[:,n_depths-i-1] = dc_motion_interp
-        med_motion_interp = med_motion.get_displacement_at_time_and_depth(times, np.ones(len(times)) * dist)
-        med_motion_depths[:,n_depths-i-1] = med_motion_interp
+        if method == 'ks' or method == 'all':
+            ks_motion_interp = ks_motion.get_displacement_at_time_and_depth(times, np.ones(len(times)) * dist)
+            ks_motion_depths[:,n_depths-i-1] = ks_motion_interp
+            axs[i].plot(times, ks_motion_interp, label='Kilosort')
+        
+        if method == 'dc' or method == 'all':
+            dc_motion_interp = dc_motion.get_displacement_at_time_and_depth(times, np.ones(len(times)) * dist)
+            dc_motion_depths[:,n_depths-i-1] = dc_motion_interp
+            axs[i].plot(times, dc_motion_interp, label='Decentralized')
 
-        axs[i].plot(times, ks_motion_interp, label='Kilosort')
-        axs[i].plot(times, dc_motion_interp, label='Decentralized')
-        axs[i].plot(times, med_motion_interp, label='MEDiCINe')
+        if method == 'med' or method == 'all':
+            med_motion_interp = med_motion.get_displacement_at_time_and_depth(times, np.ones(len(times)) * dist)
+            med_motion_depths[:,n_depths-i-1] = med_motion_interp
+            axs[i].plot(times, med_motion_interp, label='MEDiCINe')
+
+
         if i == n_depths // 2: 
             axs[i].set_ylabel('Motion (um)')
         if i == n_depths - 1:
@@ -296,38 +324,41 @@ def plot_motion_output(seg, cache_dir, save_dir=None, plot_stride=30, uV_per_bit
     cmap = plt.get_cmap('winter')
     colors = cmap(peak_amplitudes)
     fig, axes = plt.subplots(1, 3, figsize=(15, 10), sharex=True, sharey=True)
-    
-    peak_depth_ks = _correct_motion_on_peaks(
-        peak_times,
-        peak_depths,
-        ks_motion_depths,
-        times,
-        depths
-    )
 
-    _ = _plot_neural_activity(axes[0], peak_times, peak_depth_ks, colors)
-    axes[0].set_title("Kilosort")
+    if method == 'ks' or method == 'all':
+        peak_depth_ks = _correct_motion_on_peaks(
+            peak_times,
+            peak_depths,
+            ks_motion_depths,
+            times,
+            depths
+        )
 
-    peak_depth_dc = _correct_motion_on_peaks(
-        peak_times,
-        peak_depths,
-        dc_motion_depths,
-        times,
-        depths
-    )
-    _ = _plot_neural_activity(axes[1], peak_times, peak_depth_dc, colors)
-    axes[1].set_title("Decentralized")
+        _ = _plot_neural_activity(axes[0], peak_times, peak_depth_ks, colors)
+        axes[0].set_title("Kilosort")
 
-    peak_depth_med = _correct_motion_on_peaks(
-        peak_times,
-        peak_depths,
-        med_motion_depths,
-        times,
-        depths
-    )
-    plot = _plot_neural_activity(axes[2], peak_times, peak_depth_med, colors)
-    axes[2].set_title("MEDiCINe")
-    fig.colorbar(plot, ax=axes[2]) 
+    if method == 'dc' or method == 'all':
+        peak_depth_dc = _correct_motion_on_peaks(
+            peak_times,
+            peak_depths,
+            dc_motion_depths,
+            times,
+            depths
+        )
+        _ = _plot_neural_activity(axes[1], peak_times, peak_depth_dc, colors)
+        axes[1].set_title("Decentralized")
+
+    if method == 'med' or method == 'all':
+        peak_depth_med = _correct_motion_on_peaks(
+            peak_times,
+            peak_depths,
+            med_motion_depths,
+            times,
+            depths
+        )
+        plot = _plot_neural_activity(axes[2], peak_times, peak_depth_med, colors)
+        axes[2].set_title("MEDiCINe")
+        fig.colorbar(plot, ax=axes[2]) 
     plt.tight_layout()
     plt.savefig(save_dir / 'amplitude_depth_comparison.png')
 
@@ -336,40 +367,43 @@ def plot_motion_output(seg, cache_dir, save_dir=None, plot_stride=30, uV_per_bit
     #
 
     # Kilosort
-    f_ks = plot_motion_correction(
-        spike_times,
-        spike_depths,
-        spike_amps,
-        times,
-        depths,
-        ks_motion_depths,
-    )
-    f_ks.suptitle('Kilosort')
-    f_ks.savefig(save_dir / 'kilosort_motion_correction.png')
+    if method == 'ks' or method == 'all':
+        f_ks = plot_motion_correction(
+            spike_times,
+            spike_depths,
+            spike_amps,
+            times,
+            depths,
+            ks_motion_depths,
+        )
+        f_ks.suptitle('Kilosort')
+        f_ks.savefig(save_dir / 'kilosort_motion_correction.png')
 
     # Decentralized
-    f_dc = plot_motion_correction(
-        spike_times,
-        spike_depths,
-        spike_amps,
-        times,
-        depths,
-        dc_motion_depths,
-    )
-    f_dc.suptitle('Decentralized')    
-    f_dc.savefig(save_dir / 'decentralized_motion_correction.png')
+    if method == 'dc' or method == 'all':
+        f_dc = plot_motion_correction(
+            spike_times,
+            spike_depths,
+            spike_amps,
+            times,
+            depths,
+            dc_motion_depths,
+        )
+        f_dc.suptitle('Decentralized')    
+        f_dc.savefig(save_dir / 'decentralized_motion_correction.png')
 
     # MEDiCINe
-    f_med = plot_motion_correction(
-        spike_times,
-        spike_depths,
-        spike_amps,
-        times,
-        depths,
-        med_motion_depths,
-    )
-    f_med.suptitle('MEDiCINe')
-    f_med.savefig(save_dir / 'medicine_motion_correction.png')
+    if method == 'med' or method == 'all':
+        f_med = plot_motion_correction(
+            spike_times,
+            spike_depths,
+            spike_amps,
+            times,
+            depths,
+            med_motion_depths,
+        )
+        f_med.suptitle('MEDiCINe')
+        f_med.savefig(save_dir / 'medicine_motion_correction.png')
     
     plt.close('all')
 

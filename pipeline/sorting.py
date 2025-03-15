@@ -152,9 +152,11 @@ def sort_ks4(seg, cache_dir, sorter_params = {}, recalc=False):
         shutil.rmtree(cache_dir)
 
     ks4_sorting = None
+    ks4_sorter = None
     if cache_dir.exists():
         try:
             ks4_sorting = KilosortResults(cache_dir / 'sorter_output')
+            ks4_sorter = load_extractor(cache_dir / 'sorter')
         except Exception as e:
             print(f'Failed to load kilosort4 sorting: {e}')
             shutil.rmtree(cache_dir)
@@ -164,12 +166,19 @@ def sort_ks4(seg, cache_dir, sorter_params = {}, recalc=False):
         sorter_params = get_default_sorter_params('kilosort4')
         sorter_params['do_correction'] = False # Turns off drift correction
         sorter_params['save_extra_vars'] = True # required for truncation qc
+        sorter_params['Th_universal'] = 13
+        sorter_params['Th_learned'] = 9
+        #sorter_params['tmin'] = 0 # doesn't seem to be supported
+        #sorter_params['tmax'] = 300
+        sorter_params['duplicate_spike_ms'] = 0.5
+        sorter_params['ccg_threshold'] = 0.5 #increased from 0.25, to account for long recordings where similar/same units trade off but have shared spikes
         sorter_params = dict(sorter_params, **sorter_params)
 
-        _ = run_sorter("kilosort4", seg, folder=str(cache_dir), verbose=True, remove_existing_folder=True, **sorter_params)
-        ks4_sorting = KilosortResults(cache_dir / 'sorter_output')
+        ks4_sorter = run_sorter("kilosort4", seg, folder=str(cache_dir), verbose=True, remove_existing_folder=True, **sorter_params)
+        ks4_sorter.save_to_folder(cache_dir / 'sorter')
+        ks4_sorting = KilosortResults(cache_dir / 'sorter_output') # Pull from output directory
 
-    return ks4_sorting
+    return ks4_sorting, ks4_sorter
 
 
 

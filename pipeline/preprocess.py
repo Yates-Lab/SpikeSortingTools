@@ -121,20 +121,21 @@ def condition_signal(seg, cache_dir, recalc=False, uV_per_bit=.195, uV_thresh=.5
 
     # Add neuropixels probe if not already present
     n_channels = seg.get_num_channels()
-    if n_channels == 384 or n_channels == 385 and not seg.has_probe():
-        print('\tProbe metadata missing. Adding default Neuropixels NHP long configuration...')
-        probe = get_45mm_npx_probe()
-        seg = seg.set_probe(probe)
-        inter_sample_shift = np.tile(np.repeat(np.arange(12) / 13, 2), 16)
-        seg.set_property('inter_sample_shift', inter_sample_shift)
+    # if (n_channels == 384 or n_channels == 385) and not seg.has_probe():
+    #     print('\tProbe metadata missing. Adding default Neuropixels NHP long configuration...')
+    #     probe = get_45mm_npx_probe()
+    #     seg = seg.set_probe(probe)
+    #     inter_sample_shift = np.tile(np.repeat(np.arange(12) / 13, 2), 16)
+    #     seg.set_property('inter_sample_shift', inter_sample_shift)
 
-    seg_sat = blank_staturation(seg, uV_thresh / uV_per_bit, direction='both')
+    seg_shift = phase_shift(seg)
+    seg_sat = blank_staturation(seg_shift, uV_thresh / uV_per_bit, direction='both') #remove blanks? Previously this was before the phase shift?
 
-    seg_shift = phase_shift(seg_sat)
+     
      
     f_cm = cache_dir / 'channel_metrics.npy'
     if not f_cm.exists() or recalc:
-        similarity, noise = get_channel_metrics(seg_shift, debug=True)
+        similarity, noise = get_channel_metrics(seg_sat, n_batches=50, debug=True)
         if cache_dir is not None:
             np.save(cache_dir / 'channel_metrics.npy', np.stack((similarity, noise)))
     else:
@@ -145,9 +146,9 @@ def condition_signal(seg, cache_dir, recalc=False, uV_per_bit=.195, uV_thresh=.5
     bad_channels = np.logical_or(noisy_channels, dead_channels)
     print(f'\tFound {np.sum(noisy_channels)} noisy channels and {np.sum(dead_channels)} dead channels')
 
-    ids = seg_shift.get_channel_ids()
+    ids = seg_sat.get_channel_ids()
     bad_ids = ids[bad_channels]
-    seg_interp = interpolate_bad_channels(seg_shift, bad_ids)
+    seg_interp = interpolate_bad_channels(seg_sat, bad_ids)
 
     seg_cr = common_reference(seg_interp, reference = 'global', operator = 'median')
 
