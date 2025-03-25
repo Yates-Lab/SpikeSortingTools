@@ -10,7 +10,7 @@ from spikeinterface.preprocessing import interpolate_bad_channels
 from scipy.signal import medfilt, welch
 from spikeinterface.preprocessing import highpass_filter
 from spikeinterface.preprocessing import common_reference
-from spikeinterface.preprocessing import highpass_filter
+from spikeinterface.preprocessing import filter
 
 from probeinterface import Probe
 from probeinterface.plotting import plot_probe
@@ -129,9 +129,8 @@ def condition_signal(seg, cache_dir, recalc=False, uV_per_bit=.195, uV_thresh=.5
     #     seg.set_property('inter_sample_shift', inter_sample_shift)
 
     seg_shift = phase_shift(seg)
-    seg_sat = blank_staturation(seg_shift, uV_thresh / uV_per_bit, direction='both') #remove blanks? Previously this was before the phase shift?
-
-     
+    seg_sat = blank_staturation(seg_shift, uV_thresh / uV_per_bit, direction='both') #remove blanks before the phase shift? Shouldn't matter but kind of weird
+    
      
     f_cm = cache_dir / 'channel_metrics.npy'
     if not f_cm.exists() or recalc:
@@ -146,14 +145,20 @@ def condition_signal(seg, cache_dir, recalc=False, uV_per_bit=.195, uV_thresh=.5
     bad_channels = np.logical_or(noisy_channels, dead_channels)
     print(f'\tFound {np.sum(noisy_channels)} noisy channels and {np.sum(dead_channels)} dead channels')
 
+    #might be a good idea to pass the noise levels back up to set the kilosort thresholds adaptively
+
+
     ids = seg_sat.get_channel_ids()
     bad_ids = ids[bad_channels]
     seg_interp = interpolate_bad_channels(seg_sat, bad_ids)
 
-    seg_cr = common_reference(seg_interp, reference = 'global', operator = 'median')
-
+    #Common reference after removing bad channels is a good idea
+    #local car for the not as stable as we'd like npx grounds over multiple areas
+    #local_radius : tuple(int, int), default: (30, 55) loccar_um=40,140. In CatGT we also did butterworth filtering for AP
+    seg_cr = common_reference(seg_interp, reference = 'local', operator = 'average', local_radius = (40, 140)) 
     seg_hp = highpass_filter(seg_cr, freq_min=300., direction='forward-backward')
-    
+    #seg_hp = filter(seg_cr, band=[300.0, 6000.0],btype='bandpass',filter_order=12, ftype= 'butter' ,direction='forward-backward')
+   
     fig, axs = plt.subplots(1,2, figsize=(8,6), sharey=True)
     axs[0].plot(similarity, np.arange(n_channels))
     axs[0].scatter(similarity[dead_channels], np.where(dead_channels)[0], color='r')

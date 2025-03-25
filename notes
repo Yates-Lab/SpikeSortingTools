@@ -60,3 +60,24 @@ Alternative solutions:
 	
 	
 Write binary now takes forever, probably need to reduce batch durations in preprocess from 2 to 1? Ensure parallelisation
+
+3-15-2025
+Cache not actually saving to disk????
+"Use cache_folder=/tmp/spikeinterface_cache/tmpmm3yjl42/pipeline_results/kilosort4/sorter"
+/home/huklab/anaconda3/envs/spikeinterface/lib/python3.12/site-packages/spikeinterface/core/basesorting.py:261: UserWarning: The registered recording will not be persistent on disk, but only available in memory
+  warnings.warn("The registered recording will not be persistent on disk, but only available in memory")
+	passing "pipeline_results/kolisort4/sorter" probably saved as a relative path...
+	
+
+
+
+3-20-2025
+After more experimentation. 
+	TODO:
+		Need to know if the combined files are actually still synced/syncable
+		Need to make sure we can load up good epochs and QA metrics in MATLAB for export
+		Need to check if catgt CAR version is correct (one we had previously tested), or if we can pick a better ground
+		Need to do curation merges and removals earlier
+		
+		Need to   
+  

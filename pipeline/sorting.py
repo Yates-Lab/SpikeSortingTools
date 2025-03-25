@@ -1,4 +1,4 @@
-from spikeinterface.sorters import run_sorter, get_default_sorter_params
+
 from spikeinterface.extractors import read_kilosort
 from pathlib import Path
 import shutil
@@ -6,6 +6,7 @@ from spikeinterface.core import load_extractor
 import numpy as np
 from spikeinterface.extractors import read_kilosort
 import pandas as pd
+from spikeinterface.sorters import run_sorter
 
 class KilosortResults:
     def __init__(self, directory):
@@ -121,7 +122,7 @@ def save_binary_recording(seg, cache_dir, recalc=False):
             shutil.rmtree(cache_dir)
     
     if not cache_dir.exists():
-        seg.save(folder=cache_dir)
+        seg.save(folder=cache_dir, n_jobs=-1)
 
     return load_extractor(cache_dir)
 
@@ -162,20 +163,10 @@ def sort_ks4(seg, cache_dir, sorter_params = {}, recalc=False):
             shutil.rmtree(cache_dir)
 
     if not cache_dir.exists():
-        # Run kilosort4 locally
-        sorter_params = get_default_sorter_params('kilosort4')
-        sorter_params['do_correction'] = False # Turns off drift correction
-        sorter_params['save_extra_vars'] = True # required for truncation qc
-        sorter_params['Th_universal'] = 13
-        sorter_params['Th_learned'] = 9
-        #sorter_params['tmin'] = 0 # doesn't seem to be supported
-        #sorter_params['tmax'] = 300
-        sorter_params['duplicate_spike_ms'] = 0.5
-        sorter_params['ccg_threshold'] = 0.5 #increased from 0.25, to account for long recordings where similar/same units trade off but have shared spikes
-        sorter_params = dict(sorter_params, **sorter_params)
+
 
         ks4_sorter = run_sorter("kilosort4", seg, folder=str(cache_dir), verbose=True, remove_existing_folder=True, **sorter_params)
-        ks4_sorter.save_to_folder(cache_dir / 'sorter')
+        ks4_sorter.save_to_folder(folder=cache_dir / 'sorter')
         ks4_sorting = KilosortResults(cache_dir / 'sorter_output') # Pull from output directory
 
     return ks4_sorting, ks4_sorter

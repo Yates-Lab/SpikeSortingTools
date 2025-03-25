@@ -30,8 +30,8 @@ def correct_motion(seg, cache_dir, detect_peak_args={}, localize_peak_args={}, k
 
     default_detect_peak_args = dict(
         method = 'locally_exclusive',  #'locally_exclusive', # replace with locally_exclusive_torch to use DetectPeakLocallyExclusiveTorch ???
-        radius_um = 50, #was 100, possibly for the nhp probes, resetting to default 
-        detect_threshold=5 #7
+        radius_um = 75, #was 100, possibly for the nhp probes, default is 50
+        detect_threshold=6 #default is 5, Ryan had 7
     )
     detect_peak_args = dict(default_detect_peak_args, **detect_peak_args)
 
@@ -140,11 +140,17 @@ def correct_motion(seg, cache_dir, detect_peak_args={}, localize_peak_args={}, k
         # Create directory to store MEDiCINe outputs for this recording
         medicine_output_dir = cache_dir / 'medicine'
         medicine_output_dir.mkdir(parents=True, exist_ok=True)
+
+        if seg.get_time_info()['t_start'] is not None:
+            peak_times_ = peaks['sample_index'] / seg.get_sampling_frequency() + seg.get_time_info()['t_start']
+        else:
+            peak_times_ = peaks['sample_index'] / seg.get_sampling_frequency()
+        # Run MEDiCINe
         if not (medicine_output_dir / "motion.npy").exists() or recalc:
             medicine.run_medicine(
                 peak_amplitudes=peaks['amplitude'],
                 peak_depths=peak_locations['y'],
-                peak_times=peaks['sample_index'] / seg.get_sampling_frequency() + seg.get_time_info()['t_start'],
+                peak_times=peak_times_,#peaks['sample_index'] / seg.get_sampling_frequency() + seg.get_time_info()['t_start'],
                 output_dir=medicine_output_dir,
                 **med_motion_args
             )
@@ -177,11 +183,11 @@ def correct_motion(seg, cache_dir, detect_peak_args={}, localize_peak_args={}, k
             motion = med_motion
 
     # Interpolate motion using MEDiCINe
-    #motion = med_motion
-    #if method == 'ks':
-    #    motion = ks_motion
-    #if method == 'dc':
-    #    motion = dc_motion
+    motion = med_motion
+    if method == 'ks':
+       motion = ks_motion
+    if method == 'dc':
+       motion = dc_motion
 
     seg_sort = astype(interpolate_motion(astype(seg, "float"), motion, border_mode='force_zeros'), "int16")
 
@@ -239,7 +245,10 @@ def plot_motion_output(seg, cache_dir, save_dir=None, plot_stride=30, uV_per_bit
     
 
     spike_samples = peaks['sample_index']
-    spike_times = spike_samples / seg.get_sampling_frequency() + seg.get_time_info()['t_start']
+    if seg.get_time_info()['t_start'] is not None:
+        spike_times = spike_samples / seg.get_sampling_frequency() + seg.get_time_info()['t_start']
+    else:
+        spike_times = spike_samples / seg.get_sampling_frequency()
     spike_depths = peak_locations['y']
     spike_amps = peaks['amplitude'] * uV_per_bit
 

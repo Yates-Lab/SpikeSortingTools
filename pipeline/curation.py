@@ -75,8 +75,8 @@ def run_cur(seg, ks4_sorter, cache_dir, recalc=False):
     ----------
     seg: spikeinterface recording segment
         The recording segment which was sorted. Used to extract waveforms and other data.
-    results: KilosortResults
-        The results of the kilosort4 sorting.
+    sorter: Kilosort sorter
+        The sorter used to sort the data. 
     
     Returns
     -------
@@ -88,10 +88,10 @@ def run_cur(seg, ks4_sorter, cache_dir, recalc=False):
         cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    npz_path = cache_dir / 'cur_todo_phy.npz'
-    
-    if npz_path.exists() and not recalc:
-        curation_todo = np.load(npz_path)
+    npy_path = cache_dir / 'cur_todo_phy.npy'
+    #analyzer, cache_dir / 'clean_sorting_analyzer_phy'
+    if npy_path.exists() and not recalc:
+        curation_todo = np.load(npy_path, allow_pickle=True)
         return curation_todo
     
 
@@ -138,49 +138,59 @@ def run_cur(seg, ks4_sorter, cache_dir, recalc=False):
         "removed_units":remove_unit_ids,
     }
 
-    export_to_phy(analyzer, cache_dir / 'clean_sorting_analyzer_phy')
-    np.savez(npz_path, **curation_todo)
+
+    np.save(npy_path, curation_todo, allow_pickle=True)
     #ideally save to cluster_info.tsv and cluster_group.tsv
     #export_to_phy(analyzer, cache_dir / 'clean_sorting_analyzer_phy')
+
+
+    # analyzer.compute(["waveforms", "templates"]) #phy needs waveforms to be computed
+    # export_to_phy(analyzer, cache_dir / 'clean_sorting_analyzer_phy',copy_binary=False, compute_pc_features=False)
+    
+
+
+    # Prepare curation dictionary
+    label_definitions={
+        "quality": {
+            "label_options": [
+                "good",
+                "noise",
+                "mua",
+                "artifact"
+            ],
+            "exclusive": "true"
+        },
+        "putative_type": {
+            "label_options": [
+                "excitatory",
+                "inhibitory",
+                "pyramidal",
+                "mitral"
+            ],
+            "exclusive": "false"
+        }
+    }
+    
+    ks_labels = ks4_sorter.get_property('KSLabel')
+    ks_ids=ks4_sorter.unit_ids
+
+    curation_dict = {
+        "format_version": "1",
+        "unit_ids": ks_ids,
+        "label_definitions": label_definitions,
+        "manual_labels": ks_labels, #need to add unit_ids to this, or change curation_dict behavior
+        "merge_unit_groups": merge_unit_groups,
+        "removed_units":remove_unit_ids,
+        "merging_mode": "hard",
+        "censor_ms": 0.25
+    }
+    
+    clean_analyzer=apply_curation(analyzer, curation_dict=curation_dict)
+
+    clean_analyzer.compute(["waveforms", "templates"]) #phy needs waveforms to be computed
+    export_to_phy(clean_analyzer, cache_dir / 'clean_sorting_analyzer_phy',copy_binary=False, compute_pc_features=False)
+
     return curation_todo
-
-
-    # # Prepare curation dictionary
-    # label_definitions={
-    #     "quality": {
-    #         "label_options": [
-    #             "good",
-    #             "noise",
-    #             "mua",
-    #             "artifact"
-    #         ],
-    #         "exclusive": "true"
-    #     },
-    #     "putative_type": {
-    #         "label_options": [
-    #             "excitatory",
-    #             "inhibitory",
-    #             "pyramidal",
-    #             "mitral"
-    #         ],
-    #         "exclusive": "false"
-    #     }
-    # }
-    
-    # ks_labels = ks4_sorter.get_property('KSLabel')
-    # ks_ids=ks4_sorter.unit_ids
-
-    # curation_dict = {
-    #     "format_version": "1",
-    #     "unit_ids": ks_ids,
-    #     "label_definitions": label_definitions,
-    #     "manual_labels": ks_labels, #need to add unit_ids to this, or change curation_dict behavior
-    #     "merge_unit_groups": merge_unit_groups,
-    #     "removed_units":remove_unit_ids,
-    # }
-    
-    # cur_sorter=apply_curation(ks4_sorter, curation_dict=curation_dict)
-    # return cur_sorter
 
     # # merge units with similar templates and correlograms
     # analyzer.compute("waveforms")
