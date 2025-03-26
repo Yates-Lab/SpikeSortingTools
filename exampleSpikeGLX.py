@@ -7,7 +7,7 @@ import shutil
 import spikeinterface.full as si
 
 #%% Change this code to load your data
-data_dir=   r"/mnt/NPX/Rocky/20240707/Rocky20240707_V1V2_g0/"
+data_dir=   r"/mnt/NPX/Rocky/20240704/Rocky20240704_V1V2_g0/"
 
 stream_id = "imec1.ap" #usually imec0 is first inserted probe (often V2/MT), imec1 is second probe (often V1)
 seg = si.read_spikeglx(folder_path=data_dir, load_sync_channel=False, stream_id=stream_id)# experiment_names="experiment1")
@@ -19,12 +19,13 @@ seg = si.read_spikeglx(folder_path=data_dir, load_sync_channel=False, stream_id=
 
 #%%
 # run pipelines
-pipeline_dir = Path('/home/huklab/Documents/RyanSorting/SpikeSortingTools/pipeline_results_test1')
+pipeline_dir = Path('/home/huklab/Documents/RyanSorting/SpikeSortingTools/pipeline_results_Rocky20240704_V1V2_g0_imec1')
 pipeline_dir.mkdir(parents=True, exist_ok=True)
 
 #%%
 # condition signal runs 1) bad channel detection 2) 
-seg_pre = condition_signal(seg, cache_dir=pipeline_dir / 'conditioning', noise_thresh=0.1, recalc=False)
+noise_thresh = 0.2 # higher for spikeGLX, 
+seg_pre = condition_signal(seg, cache_dir=pipeline_dir / 'conditioning', noise_thresh=noise_thresh, recalc=False)
 
 #%% DEBUG: quick saving out of the preprocessed recording before motion correction
 #seg_saved = save_binary_recording(seg_pre, pipeline_dir / 'preprocessed_recording', recalc=False)
@@ -51,10 +52,10 @@ plot_motion_output(seg_motion, cache_dir=pipeline_dir / 'motion')
 sorter_params = get_default_sorter_params('kilosort4')
 sorter_params['do_correction'] = False # Turns off drift correction
 sorter_params['save_extra_vars'] = True # required for truncation qc
-sorter_params['Th_universal'] = 9
+sorter_params['Th_universal'] = 11
 sorter_params['Th_learned'] = 8
 sorter_params['duplicate_spike_ms'] = 0.5
-sorter_params['ccg_threshold'] = 0.25 #increased from 0.25, to account for long recordings where similar/same units trade off but have shared spikes
+sorter_params['ccg_threshold'] = 0.4 #increased from 0.25, to account for long recordings where similar/same units trade off but have shared spikes
 sorter_params = dict(sorter_params, **sorter_params)
 
 #%%

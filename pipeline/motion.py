@@ -31,7 +31,7 @@ def correct_motion(seg, cache_dir, detect_peak_args={}, localize_peak_args={}, k
     default_detect_peak_args = dict(
         method = 'locally_exclusive',  #'locally_exclusive', # replace with locally_exclusive_torch to use DetectPeakLocallyExclusiveTorch ???
         radius_um = 75, #was 100, possibly for the nhp probes, default is 50
-        detect_threshold=6 #default is 5, Ryan had 7
+        detect_threshold=7 #default is 5, Ryan had 7
     )
     detect_peak_args = dict(default_detect_peak_args, **detect_peak_args)
 
@@ -131,10 +131,15 @@ def correct_motion(seg, cache_dir, detect_peak_args={}, localize_peak_args={}, k
     ###
     # MEDiCINe motion
     ###
+    # Getting a little bit of overfitting, might want to increase time width of the bins
+    # time_kernel_width = 30 #default is 30
+    # num_depth_bins = 2 #default is 2
+    # amplitude_threshold = 0 #default is 0, but may want to threshold higher
+
     if method == 'med' or method == 'all':
         print('Estimating MEDiCINe motion...')
 
-        default_med_motion_args = dict(time_bin_size = 2.0, num_depth_bins = 2)
+        default_med_motion_args = dict(time_bin_size = 2.0, num_depth_bins = 2, time_kernel_width = 50, amplitude_threshold = 0.1)
         med_motion_args = dict(default_med_motion_args, **med_motion_args)
 
         # Create directory to store MEDiCINe outputs for this recording
