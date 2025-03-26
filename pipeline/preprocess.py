@@ -110,6 +110,10 @@ def get_channel_metrics(seg, n_batches=50, batch_duration=2, med_n=11, psd_cutto
 
 
 def condition_signal(seg, cache_dir, recalc=False, uV_per_bit=.195, uV_thresh=.5e3, similarity_thresh=-0.5, noise_thresh=1e-2, job_kwargs={}):
+    gainvals=list(set(seg.get_property('gain_to_uV')))
+    if len(gainvals) ==1:
+        uV_per_bit=gainvals[0]
+    print(f'Gain value is {uV_per_bit} uV/bit')
 
     if isinstance(cache_dir, str):
         cache_dir = Path(cache_dir)
@@ -119,22 +123,20 @@ def condition_signal(seg, cache_dir, recalc=False, uV_per_bit=.195, uV_thresh=.5
 
     job_kwargs = dict(get_default_job_kwargs(), **job_kwargs)
 
-    # Add neuropixels probe if not already present
     n_channels = seg.get_num_channels()
-    # if (n_channels == 384 or n_channels == 385) and not seg.has_probe():
-    #     print('\tProbe metadata missing. Adding default Neuropixels NHP long configuration...')
-    #     probe = get_45mm_npx_probe()
-    #     seg = seg.set_probe(probe)
-    #     inter_sample_shift = np.tile(np.repeat(np.arange(12) / 13, 2), 16)
-    #     seg.set_property('inter_sample_shift', inter_sample_shift)
 
-    seg_shift = phase_shift(seg)
+    check_sample_shift=seg.get_property('inter_sample_shift')
+    if  check_sample_shift.any() != None:    
+        seg_shift = phase_shift(seg)
+    else:
+        seg_shift = seg
     seg_sat = blank_staturation(seg_shift, uV_thresh / uV_per_bit, direction='both') #remove blanks before the phase shift? Shouldn't matter but kind of weird
     
      
     f_cm = cache_dir / 'channel_metrics.npy'
     if not f_cm.exists() or recalc:
-        similarity, noise = get_channel_metrics(seg_sat, n_batches=50, debug=True)
+        batchn=min([seg.get_num_samples()/seg.get_sampling_frequency()/2, 50]) # 50 batches unless the recording is shorter than 10s
+        similarity, noise = get_channel_metrics(seg_sat, n_batches=int(batchn), uV_per_bit=uV_per_bit, debug=True)
         if cache_dir is not None:
             np.save(cache_dir / 'channel_metrics.npy', np.stack((similarity, noise)))
     else:
@@ -145,20 +147,22 @@ def condition_signal(seg, cache_dir, recalc=False, uV_per_bit=.195, uV_thresh=.5
     bad_channels = np.logical_or(noisy_channels, dead_channels)
     print(f'\tFound {np.sum(noisy_channels)} noisy channels and {np.sum(dead_channels)} dead channels')
 
-    #might be a good idea to pass the noise levels back up to set the kilosort thresholds adaptively
-
-
+    #Todo: might be a good idea to pass the noise levels back up to set the kilosort thresholds adaptively
     ids = seg_sat.get_channel_ids()
     bad_ids = ids[bad_channels]
     seg_interp = interpolate_bad_channels(seg_sat, bad_ids)
 
-    #Common reference after removing bad channels is a good idea
-    #local car for the not as stable as we'd like npx grounds over multiple areas
+    #Doing the common reference after removing bad channels and high frequency noise is a good idea
+    #global car for the not as stable as we'd like npx grounds over multiple areas
     #local_radius : tuple(int, int), default: (30, 55) loccar_um=40,140. In CatGT we also did butterworth filtering for AP
-    seg_cr = common_reference(seg_interp, reference = 'local', operator = 'average', local_radius = (40, 140)) 
-    seg_hp = highpass_filter(seg_cr, freq_min=300., direction='forward-backward')
-    #seg_hp = filter(seg_cr, band=[300.0, 6000.0],btype='bandpass',filter_order=12, ftype= 'butter' ,direction='forward-backward')
-   
+    
+    # seg_cr = common_reference(seg_interp, reference = 'global', operator = 'median') 
+    # seg_out = highpass_filter(seg_cr, freq_min=300., direction='forward-backward')
+    
+    seg_hp = filter(seg_interp, band=[300.0, 9000.0],btype='bandpass',filter_order=12, ftype= 'butter' ,direction='forward-backward')
+    # Note on filter, forward-backward doubles the effective filter order
+    seg_out = common_reference(seg_hp, reference = 'local', operator = 'median', local_radius = (40, 140)) 
+
     fig, axs = plt.subplots(1,2, figsize=(8,6), sharey=True)
     axs[0].plot(similarity, np.arange(n_channels))
     axs[0].scatter(similarity[dead_channels], np.where(dead_channels)[0], color='r')
@@ -175,6 +179,6 @@ def condition_signal(seg, cache_dir, recalc=False, uV_per_bit=.195, uV_thresh=.5
     fig.savefig(cache_dir / 'channel_metrics.png')
     plt.close('all')
 
-    return seg_hp
+    return seg_out
 
 

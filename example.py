@@ -18,18 +18,13 @@ w_ts = sw.plot_timeseries(recording, time_range=(0, 5))
 w_rs = sw.plot_rasters(sorting_true, time_range=(0, 5))
 
 
-#%% Run on a snippet to check params
-start_time = 9500 - 4743 #lots of motion around 10000s in, but time didn't start at 0?
-stop_time  = start_time + 1000 
-seg=seg.frame_slice(start_time * 30000, stop_time * 30000) #100 seconds snippet, if really low will need to change n_batches down from 50 to 5 in condition_signal ln137
-
 #%%
 # run pipelines
-pipeline_dir = Path('/home/huklab/Documents/RyanSorting/SpikeSortingTools/pipeline_results_aftercatgt')
+pipeline_dir = Path('/home/huklab/Documents/RyanSorting/SpikeSortingTools/pipeline_results_test')
 pipeline_dir.mkdir(parents=True, exist_ok=True)
 
 # condition signal runs 1) bad channel detection 2) 
-seg_pre = condition_signal(seg, cache_dir=pipeline_dir / 'conditioning', recalc=False)
+seg_pre = condition_signal(recording, cache_dir=pipeline_dir / 'conditioning', recalc=False)
 
 # Motion issue on long recordings, kilosort4 is actually more robust??
 seg_motion = correct_motion(seg_pre, cache_dir=pipeline_dir / 'motion', recalc=False, method='all')

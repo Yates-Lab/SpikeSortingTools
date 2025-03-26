@@ -5,9 +5,13 @@ from pathlib import Path
 import shutil
 # I'm using a pinned version of spikeinterface, so if something doesn't work with the latest version, ask about it
 import spikeinterface.full as si
-#%%
+#%% Load a single file
+data_dir = Path('/mnt/NPX/Gru/20220323/2022-03-23_15-36-56/')#Path('/media/huklab/Data/NPX/Spikesorting/Combining/Gru_2022-0412_Probe1/') #Path('/home/ryanress/code/DataHorwitzLGN/data/raw/2024-12-10_Chihiro/2024-12-10_15-40-46')
+stream_name = "Record Node 101#Neuropix-PXI-100.0"
+seg = si.read_openephys(data_dir, load_sync_timestamps=False, stream_name=stream_name, experiment_names="experiment1")# experiment_names="experiment1")
 
-# Change this code to load your data
+
+#%% Load and concatenate data
 data_dir = Path('/mnt/NPX/Gru/20220323/')#/2022-04-12_12-42-59/')#Path('/media/huklab/Data/NPX/Spikesorting/Combining/Gru_2022-0412_Probe1/') #Path('/home/ryanress/code/DataHorwitzLGN/data/raw/2024-12-10_Chihiro/2024-12-10_15-40-46')
 stream_name = "Record Node 101#Neuropix-PXI-100.0"
 
