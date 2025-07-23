@@ -17,8 +17,6 @@ def ensure_ndarray(x, dtype=None):
     numpy.ndarray
         The input converted to a numpy array.
     """
-    if isinstance(x, torch.Tensor):
-        x = x.cpu().numpy()
     if isinstance(x, int) or isinstance(x, float):
         x = [x]
     if isinstance(x, list) or isinstance(x, tuple):
@@ -26,6 +24,7 @@ def ensure_ndarray(x, dtype=None):
     if dtype is not None:
         x = x.astype(dtype)
     return x
+
 
 def calc_ccgs(spike_times, bin_edges, spike_clusters = None, cids=None, progress=False):
     """
@@ -43,16 +42,16 @@ def calc_ccgs(spike_times, bin_edges, spike_clusters = None, cids=None, progress
     spike_clusters : array-like (n_spikes,)
         Spike-cluster mapping. If None, all spikes are assumed to belong to
         a single cluster.
-    cids (optional): array-like (n_clusters,)
-        The list of clusters, in any order, to include in the computation. That order will be used
-        in the output array. If None, order the clusters by unit id from `spike_clusters`.
+    cluster_ids (optional): array-like (n_clusters,)
+        The list of *all* unique clusters, in any order. That order will be used
+        in the output array. If None, order the clusters by their appearance in
+        `spike_clusters`.
 
     Returns
     -------
     correlograms : array
         A `(n_clusters, n_clusters, n_bins)` array with all pairwise CCGs.
 
-    author: RKR 2/7/2024 (edited from phylib)
     """
     # Convert to NumPy arrays.
     spike_times = ensure_ndarray(spike_times)
@@ -66,32 +65,25 @@ def calc_ccgs(spike_times, bin_edges, spike_clusters = None, cids=None, progress
     assert len(spike_times) == len(spike_clusters), "Spike times and spike clusters must have the same length."
 
     if not np.all(np.diff(spike_times) >= 0):
-        logger.info("Spike times are not sorted, sorting")
+        print("Spike times are not sorted, sorting")
         sort_inds = np.argsort(spike_times)
         spike_times = spike_times[sort_inds]
         spike_clusters = spike_clusters[sort_inds]
 
-    spike_cluster_ids = np.unique(spike_clusters)
     if cids is not None:
         cids = ensure_ndarray(cids, dtype=np.int32)
-        assert np.all(np.isin(cids, spike_cluster_ids)), "Some clusters are not in spike_clusters."
+        cids_check = np.unique(spike_clusters)
+        assert np.all(np.in1d(cids, cids_check)), "Some clusters are not in spike_clusters."
     else: 
-        cids = np.sort(spike_cluster_ids)
-
-    # Filter the spike times and clusters to include only the specified clusters.
-    if not np.all(np.isin(spike_cluster_ids, cids)):
-        cids_mask = np.isin(spike_clusters, cids)
-        spike_times = spike_times[cids_mask]
-        spike_clusters = spike_clusters[cids_mask]
-
-    n_clusters = len(cids)
-    cids2inds = np.zeros(cids.max() + 1, dtype=np.int32)
-    cids2inds[cids] = np.arange(n_clusters)
-    spike_inds = cids2inds[spike_clusters]
+        cids = np.unique(spike_clusters)
 
     bin_edges = ensure_ndarray(bin_edges)
     assert bin_edges is not None
     assert np.all(np.diff(bin_edges) > 0), "Bin edges must be monotonically increasing."
+    n_clusters = len(cids)
+    clusters2inds = np.zeros(cids.max() + 1, dtype=np.int32)
+    clusters2inds[cids] = np.arange(n_clusters)
+    spike_inds = clusters2inds[spike_clusters]
 
     n_bins = len(bin_edges) - 1
     ccgs = np.zeros((n_clusters, n_clusters, n_bins), dtype=np.int32)
@@ -121,7 +113,8 @@ def calc_ccgs(spike_times, bin_edges, spike_clusters = None, cids=None, progress
     neg_mask = np.ones(len(spike_times), dtype=bool)
 
     # progress bar shows the number of spikes completed
-    pbar = tqdm(total = 1.0, desc="Calculating CCGs: Shift 1", position=0, leave=True) if progress else Mock()
+    if progress:
+        pbar = tqdm(total = 1.0, desc="Calculating CCGs: Shift 1", position=0, leave=True)
     while True:
         pos_mask[-shift:] = False
         pm = pos_mask[:-shift] # mask for positive shifts
@@ -141,7 +134,16 @@ def calc_ccgs(spike_times, bin_edges, spike_clusters = None, cids=None, progress
 
 
             # Increment the correlogram at the bin indices
-            ravel_inds = np.ravel_multi_index((pos_i, pos_j, pos_bins), ccgs.shape)
+            try: 
+                ravel_inds = np.ravel_multi_index((pos_i, pos_j, pos_bins), ccgs.shape)
+            except ValueError:
+                print(f'pos_i: {pos_i}')
+                print(f'pos_i min/max: {np.min(pos_i)}, {np.max(pos_i)}')
+                print(f'pos_j: {pos_j}')
+                print(f'pos_j min/max: {np.min(pos_j)}, {np.max(pos_j)}')
+                print(f'pos_bins: {pos_bins}')
+                print(f'pos_bins min/max: {np.min(pos_bins)}, {np.max(pos_bins)}')
+                print(f'ccgs.shape: {ccgs.shape}')
             ravel_bin_counts = np.bincount(ravel_inds, minlength=ccgs.size)
             ccgs += ravel_bin_counts.reshape(ccgs.shape)
 
@@ -173,18 +175,19 @@ def calc_ccgs(spike_times, bin_edges, spike_clusters = None, cids=None, progress
             neg_mask[shift:][nm] = valid_neg
 
         # update the progress bar with number of spikes completed
-        pbar.n = np.round(1 - (np.sum(pos_mask) + np.sum(neg_mask)) / len(spike_times) / 2, 3)
-        pbar.set_description(f"Calculating CCGs: Shift {shift}")
+        if progress:
+            pbar.n = np.round(1 - (np.sum(pos_mask) + np.sum(neg_mask)) / len(spike_times) / 2, 3)
+            pbar.set_description(f"Calculating CCGs: Shift {shift}")
 
         if not has_pos and not has_neg:
             break
 
         shift += 1
-    pbar.close()
+
+    if progress:
+        pbar.close()
 
     return ccgs
-
-
 def refractory_violation_likelihood(
         n_violations, 
         contam_prop,
@@ -355,7 +358,8 @@ def compute_min_contam_props(spike_times, spike_clusters=None, cids=None,
 
     return min_contam_props, firing_rates
 
-def plot_min_contam_prop(spike_times, min_contam_props, refractory_periods, n_bins = 50, max_contam_prop=1, acg_t_start = .25e-3):
+def plot_min_contam_prop(spike_times, min_contam_props, refractory_periods, 
+                         n_bins = 50, max_contam_prop=1, acg_t_start = .25e-3, axs=None):
     '''
     Utility for plotting the minimum contamination proportion that can be rejected for each cluster in the dataset.
     
@@ -382,7 +386,10 @@ def plot_min_contam_prop(spike_times, min_contam_props, refractory_periods, n_bi
     min_isi = acg_t_start * 1000
     min_prop = min_contam_props.min()
 
-    fig, axs = plt.subplots(1,1)
+    if axs is None:
+        fig, axs = plt.subplots(1,1)
+    else:
+        fig = axs.get_figure()
     bins = np.linspace(min_isi, max_refrac, n_bins)
     axs.hist(isis, bins=bins, edgecolor='black', color='black', alpha=0.6)
     axs.set_xlim([min_isi, max_refrac])
@@ -392,6 +399,7 @@ def plot_min_contam_prop(spike_times, min_contam_props, refractory_periods, n_bi
     axs2.plot(refractory_periods*1000, min_contam_props, color='red', linewidth=3.5)
     axs2.axhline(min_prop, color='red', linestyle='--', linewidth=2)
     yticks = np.concatenate([np.linspace(0, max_contam_prop, 6), [min_prop]])
+    axs2.set_ylim([0, max_contam_prop])
     axs2.set_yticks(yticks)
     axs2.set_yticklabels(['0', '', '', '', '', '1', f'{min_prop:.4g}'])
     axs2.tick_params(axis='y', colors='red')
@@ -399,10 +407,8 @@ def plot_min_contam_prop(spike_times, min_contam_props, refractory_periods, n_bi
 
     return fig, axs
 
-#
 # Depricated code from Nick Steinmetz's lab (Sliding RP violations)
 # https://github.com/SteinmetzLab/slidingRefractory/blob/1.0.0/python/slidingRP/metrics.py
-#
 def compute_rvl_tensor(spike_times, spike_clusters=None, cids=None,
                       refractory_periods=np.exp(np.linspace(np.log(0.5e-3), np.log(10e-3), 100)),
                       contamination_test_proportions=np.exp(np.linspace(np.log(5e-3), np.log(.35), 50)),

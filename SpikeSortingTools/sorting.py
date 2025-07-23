@@ -1,11 +1,11 @@
+from .preprocess import get_default_job_kwargs
 from spikeinterface.sorters import run_sorter, get_default_sorter_params
-from spikeinterface.extractors import read_kilosort
 from pathlib import Path
 import shutil
 from spikeinterface.core import load_extractor
 import numpy as np
-from spikeinterface.extractors import read_kilosort
 import pandas as pd
+from functools import cached_property
 
 class KilosortResults:
     def __init__(self, directory):
@@ -22,11 +22,9 @@ class KilosortResults:
 
         self.spike_times_file = directory / 'spike_times.npy'
         assert self.spike_times_file.exists(), f'{self.spike_times_file} does not exist'
-        self._spike_times = None
 
         self.spike_amplitudes_file = directory / 'amplitudes.npy'
         assert self.spike_amplitudes_file.exists(), f'{self.spike_amplitudes_file} does not exist'
-        self._spike_amplitudes = None
 
         self.st_file = directory / 'full_st.npy'
         if not self.st_file.exists():
@@ -34,78 +32,84 @@ class KilosortResults:
         self.kept_spikes_file = directory / 'kept_spikes.npy'
         if not self.kept_spikes_file.exists():
             print(f'Warning: {self.kept_spikes_file} does not exist. Use Kilosort4 with save_extra_vars=True to generate.')
-        self._st = None
 
         self.spike_clusters_file = directory / 'spike_clusters.npy'
         assert self.spike_clusters_file.exists(), f'{self.spike_clusters_file} does not exist'
-        self._spike_clusters = None
 
         self.spike_templates_file = directory / 'spike_templates.npy'
         assert self.spike_templates_file.exists(), f'{self.spike_templates_file} does not exist'
-        self._spike_templates = None
 
         self.cluster_labels_file = directory / 'cluster_KSLabel.tsv'
         assert self.cluster_labels_file.exists(), f'{self.cluster_labels_file} does not exist'
-        self._cluster_labels = None
+
+        # check if ephys_metadata.json exists two levels up
+        ephys_metadata_file = directory.parent.parent / 'ephys_metadata.json'
+        if ephys_metadata_file.exists():
+            import json
+            with open(ephys_metadata_file, 'r') as f:
+                self.ephys_metadata = json.load(f)
+
+        # check if ../spikeinterface_log.json exists
+        spikeinterface_log_file = directory.parent / 'spikeinterface_log.json'
+        if spikeinterface_log_file.exists():
+            import json
+            with open(spikeinterface_log_file, 'r') as f:
+                self.spikeinterface_log = json.load(f)
         
-    @property
+    @cached_property
     def spike_times(self):
-        if self._spike_times is None:
-            self._spike_times = np.load(self.spike_times_file)
-        return self._spike_times
+        '''
+        This now properly returns times if that info is available
+        '''
+        spike_times = np.load(self.spike_times_file) / 30000
+        return spike_times
     
-    @property
+    @cached_property
+    def spike_samples(self):
+        return np.load(self.spike_times_file)
+    
+    @cached_property
     def spike_amplitudes(self):
-        if self._spike_amplitudes is None:
-            self._spike_amplitudes = np.load(self.spike_amplitudes_file)
-        return self._spike_amplitudes
+        return self.st[:,2]
 
-    @property
+    @cached_property
     def st(self): 
-        if self._st is None:
-            st = np.load(self.st_file)
-            spikes = np.load(self.kept_spikes_file)
-            self._st = st[spikes]
-        return self._st
+        st = np.load(self.st_file)
+        spikes = np.load(self.kept_spikes_file)
+        return st[spikes]
     
-    @property
+    @cached_property
     def spike_clusters(self):
-        if self._spike_clusters is None:
-            self._spike_clusters = np.load(self.spike_clusters_file)
-        return self._spike_clusters
+        return np.load(self.spike_clusters_file)
 
-    @property
+    @cached_property
     def spike_templates(self):
-        if self._spike_templates is None:
-            self._spike_templates = np.load(self.spike_templates_file)
-        return self._spike_templates
+        return np.load(self.spike_templates_file)
 
-    @property
+    @cached_property
     def cluster_labels(self):
-        if self._cluster_labels is None:
-            self._cluster_labels = pd.read_csv(self.cluster_labels_file, sep='\t')
-        return self._cluster_labels
+        return pd.read_csv(self.cluster_labels_file, sep='\t')
 
 
-def save_binary_recording(seg, cache_dir, recalc=False):
+def save_binary_recording(seg, cache_dir, recalc=False, job_kwargs={}):
     '''
-        Save a given spikeinterface extractor to a binary format. If the cache_dir exists,
-        then will attempt to load from there. If the extractor cannot be loaded, then the extractor is saved.
-        Saving a preprocessed recording reduces computation time when running the sorter, especially if
-        running multiple sorters.
+    Save a given spikeinterface extractor to a binary format. If the cache_dir exists,
+    then will attempt to load from there. If the extractor cannot be loaded, then the extractor is saved.
+    Saving a preprocessed recording reduces computation time when running the sorter, especially if
+    running multiple sorters.
 
-        Parameters:
-        ------------
-        seg: spikeinterface extractor
-            The extractor to save
-        cache_dir: str or Path
-        recalc: bool
-            If True, will delete the cache_dir and rerun the sorter
+    Parameters:
+    ------------
+    seg: spikeinterface extractor
+        The extractor to save
+    cache_dir: str or Path
+    recalc: bool
+        If True, will delete the cache_dir and rerun the sorter
 
-        Returns:
-        -----------
-        seg_saved: spikeinterface extractor
-            The loaded output
+    Returns:
+    -----------
+    seg_saved: spikeinterface extractor
+        The loaded output
     '''
     if recalc:
         shutil.rmtree(cache_dir)
@@ -121,29 +125,31 @@ def save_binary_recording(seg, cache_dir, recalc=False):
             shutil.rmtree(cache_dir)
     
     if not cache_dir.exists():
-        seg.save(folder=cache_dir)
+        _job_kwargs = get_default_job_kwargs()
+        _job_kwargs.update(job_kwargs)
+        seg.save(folder=cache_dir, **_job_kwargs)
 
     return load_extractor(cache_dir)
 
 def sort_ks4(seg, cache_dir, sorter_params = {}, recalc=False):
     '''
-        Sort a given spikeinterface extractor using kilosort4. If the cache_dir exists,
-        then will attempt to loaded from there. If the sorting cannot be loaded, then kilsort4 is run.
+    Sort a given spikeinterface extractor using kilosort4. If the cache_dir exists,
+    then will attempt to loaded from there. If the sorting cannot be loaded, then kilsort4 is run.
 
-        Parameters:
-        ------------
-        seg: spikeinterface extractor
-            The extractor to sort
-        cache_dir: str or Path
-        sorter_params: dict
-            Parameters to pass to the sorter
-        recalc: bool
-            If True, will delete the cache_dir and rerun the sorter
+    Parameters:
+    ------------
+    seg: spikeinterface extractor
+        The extractor to sort
+    cache_dir: str or Path
+    sorter_params: dict
+        Parameters to pass to the sorter
+    recalc: bool
+        If True, will delete the cache_dir and rerun the sorter
 
-        Returns:
-        -----------
-        ks4_sorting: spikeinterface sorting extractor
-            The sorted output
+    Returns:
+    -----------
+    ks4_sorting: spikeinterface sorting extractor
+        The sorted output
     '''
     if isinstance(cache_dir, str):
         cache_dir = Path(cache_dir)
@@ -161,12 +167,12 @@ def sort_ks4(seg, cache_dir, sorter_params = {}, recalc=False):
 
     if not cache_dir.exists():
         # Run kilosort4 locally
-        sorter_params = get_default_sorter_params('kilosort4')
-        sorter_params['do_correction'] = False # Turns off drift correction
-        sorter_params['save_extra_vars'] = True # required for truncation qc
-        sorter_params = dict(sorter_params, **sorter_params)
+        params = get_default_sorter_params('kilosort4')
+        params['do_correction'] = False # Turns off drift correction
+        params['save_extra_vars'] = True # required for truncation qc
+        params = dict(params, **sorter_params) # overwrite any default params present in sorter_params
 
-        _ = run_sorter("kilosort4", seg, folder=str(cache_dir), verbose=True, remove_existing_folder=True, **sorter_params)
+        _ = run_sorter("kilosort4", seg, folder=str(cache_dir), verbose=True, remove_existing_folder=True, **params)
         ks4_sorting = KilosortResults(cache_dir / 'sorter_output')
 
     return ks4_sorting

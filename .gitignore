@@ -1,2 +1,5 @@
 **/__pycache__/
 pipeline_results
+*.egg-info
+build
+.venv

@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 
-from spikeinterface.preprocessing import blank_staturation
+from spikeinterface.preprocessing import blank_saturation
 from spikeinterface.preprocessing import phase_shift
 from spikeinterface.preprocessing import interpolate_bad_channels
 from scipy.signal import medfilt, welch
@@ -38,7 +38,7 @@ def get_45mm_npx_probe(debug=False):
 def get_default_job_kwargs():
     n_cpus = os.cpu_count()
     n_cpus = n_cpus if n_cpus is not None else 1
-    n_jobs = max(1, n_cpus - 1) 
+    n_jobs = max(1, n_cpus*3//4) 
     job_kwargs = dict(n_jobs=n_jobs, 
                       chunk_duration='2s', 
                       progress_bar=True,)
@@ -121,14 +121,17 @@ def condition_signal(seg, cache_dir, recalc=False, uV_per_bit=.195, uV_thresh=.5
 
     # Add neuropixels probe if not already present
     n_channels = seg.get_num_channels()
-    if n_channels == 384 or n_channels == 385 and not seg.has_probe():
-        print('\tProbe metadata missing. Adding default Neuropixels NHP long configuration...')
-        probe = get_45mm_npx_probe()
-        seg = seg.set_probe(probe)
-        inter_sample_shift = np.tile(np.repeat(np.arange(12) / 13, 2), 16)
-        seg.set_property('inter_sample_shift', inter_sample_shift)
+    if not seg.has_probe():
+        if n_channels == 384 or n_channels == 385:
+            print('\tProbe metadata missing. Adding default Neuropixels NHP long configuration...')
+            probe = get_45mm_npx_probe()
+            seg = seg.set_probe(probe)
+            inter_sample_shift = np.tile(np.repeat(np.arange(12) / 13, 2), 16)
+            seg.set_property('inter_sample_shift', inter_sample_shift)
+        else:
+            raise NotImplementedError('Probe metadata not implemented for this probe type')
 
-    seg_sat = blank_staturation(seg, uV_thresh / uV_per_bit, direction='both')
+    seg_sat = blank_saturation(seg, uV_thresh / uV_per_bit, direction='both')
 
     seg_shift = phase_shift(seg_sat)
      

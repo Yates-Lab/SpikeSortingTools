@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spikesortingtools"
+version = "0.1.0"
+description = "Spike sorting tools for the Yates Lab. Maintained by Ryan Ressmeyer."
+readme = "README.md"
+requires-python = "==3.12.*"
+dependencies = [
+    "kilosort==4.0.37",
+    "spikeinterface==0.102.3",
+    "medicine-neuro==1.6",
+    "torch>=2.7.0",
+    "scipy>=1.15.3",
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "tqdm",
+    "h5py",
+    "pyyaml",
+    "ipykernel>=6.29.5",
+    "plotly",
+    "dash",
+]
+
+[tool.setuptools]
+packages = ["SpikeSortingTools"]

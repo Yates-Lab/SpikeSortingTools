@@ -7,7 +7,8 @@ import medicine
 from medicine.plotting import _correct_motion_on_peaks, plot_motion_correction
 from spikeinterface.sortingcomponents.peak_detection import detect_peaks
 from spikeinterface.sortingcomponents.peak_localization import localize_peaks
-from spikeinterface.sortingcomponents.motion import estimate_motion, motion_utils, interpolate_motion
+from spikeinterface.sortingcomponents.motion import estimate_motion, interpolate_motion
+from spikeinterface.core import Motion
 from spikeinterface.preprocessing import astype
 from scipy.signal import medfilt
 
@@ -81,7 +82,7 @@ def correct_motion(seg, cache_dir, detect_peak_args={}, localize_peak_args={}, k
         np.save(ks_motion_dir / "depth_bins.npy", ks_motion.spatial_bins_um)
 
     # load kilosort motion
-    ks_motion = motion_utils.Motion(
+    ks_motion = Motion(
         displacement=np.load(ks_motion_dir / "motion.npy"),
         temporal_bins_s=np.load(ks_motion_dir / "time_bins.npy"),
         spatial_bins_um=np.load(ks_motion_dir / "depth_bins.npy"),
@@ -113,7 +114,7 @@ def correct_motion(seg, cache_dir, detect_peak_args={}, localize_peak_args={}, k
         np.save(decentralized_motion_dir / "depth_bins.npy", dc_motion.spatial_bins_um)
 
     # load decentralized motion
-    dc_motion = motion_utils.Motion(
+    dc_motion = Motion(
         displacement=np.load(decentralized_motion_dir / "motion.npy"),
         temporal_bins_s=np.load(decentralized_motion_dir / "time_bins.npy"),
         spatial_bins_um=np.load(decentralized_motion_dir / "depth_bins.npy"),
@@ -159,7 +160,7 @@ def correct_motion(seg, cache_dir, detect_peak_args={}, localize_peak_args={}, k
         np.save(medicine_output_dir / "depth_bins.npy", med_depth_bins)
 
     # Load MEDiCINe outputs
-    med_motion = motion_utils.Motion( 
+    med_motion = Motion( 
         displacement=np.load(medicine_output_dir / "motion.npy"),
         temporal_bins_s=np.load(medicine_output_dir / "time_bins.npy"),
         spatial_bins_um=np.load(medicine_output_dir / "depth_bins.npy"),
@@ -182,6 +183,8 @@ def plot_motion_output(seg, cache_dir, save_dir=None, plot_stride=30, uV_per_bit
         cache_dir = Path(cache_dir)
     if save_dir is not None and isinstance(save_dir, str):
         save_dir = Path(save_dir)
+        if not save_dir.exists():
+            save_dir.mkdir(parents=True, exist_ok=True)
     if save_dir is None:
         save_dir = cache_dir
 
@@ -199,17 +202,17 @@ def plot_motion_output(seg, cache_dir, save_dir=None, plot_stride=30, uV_per_bit
 
     peaks = np.load(cache_dir / 'peaks.npy')
     peak_locations = np.load(cache_dir / 'peak_locations.npy')
-    ks_motion = motion_utils.Motion(
-        displacement=np.load(cache_dir / "ks-motion/motion.npy")[0],
-        temporal_bins_s=np.load(cache_dir / "ks-motion/time_bins.npy")[0],
+    ks_motion = Motion(
+        displacement=np.load(cache_dir / "ks-motion/motion.npy"),
+        temporal_bins_s=np.load(cache_dir / "ks-motion/time_bins.npy"),
         spatial_bins_um=np.load(cache_dir / "ks-motion/depth_bins.npy"),
     )
-    dc_motion = motion_utils.Motion(
-        displacement=np.load(cache_dir / "decentralized-motion/motion.npy")[0],
-        temporal_bins_s=np.load(cache_dir / "decentralized-motion/time_bins.npy")[0],
+    dc_motion = Motion(
+        displacement=np.load(cache_dir / "decentralized-motion/motion.npy"),
+        temporal_bins_s=np.load(cache_dir / "decentralized-motion/time_bins.npy"),
         spatial_bins_um=np.load(cache_dir / "decentralized-motion/depth_bins.npy"),
     )
-    med_motion = motion_utils.Motion(
+    med_motion = Motion(
         displacement=np.load(cache_dir / "medicine/motion.npy"),
         temporal_bins_s=np.load(cache_dir / "medicine/time_bins.npy"),
         spatial_bins_um=np.load(cache_dir / "medicine/depth_bins.npy"),
