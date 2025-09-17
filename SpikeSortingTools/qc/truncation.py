@@ -51,10 +51,19 @@ def fit_truncated_sigmoid(x, y, x_min = 8):
     # Initial parameter estimates
     x0 = np.sum(x * y) / np.sum(y) # mean amplitude
     A0 = 1 # CDF goes from 0 to 1
-    k0 = 1 # slope
+    # initialize slope to be average slope over the data
+    if len(x) > 1:
+        k0 = (y[-1] - y[0]) / (x[-1] - x[0])
+    else:
+        k0 = 1
+
     p0 = [x0, k0, A0]
     bounds = ([x_min, 0, 0], [np.inf, np.inf, np.inf])
-    popt, _ = curve_fit(f, x, y, p0=p0, bounds=bounds)
+    try:
+        popt, _ = curve_fit(f, x, y, p0=p0, bounds=bounds)
+    except RuntimeError:
+        print('Curve fit failed, returning nans')
+        popt = [np.nan, np.nan, np.nan]
 
     return popt
 
