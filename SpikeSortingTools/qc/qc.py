@@ -264,17 +264,17 @@ def load_qc(cache_dir):
     qc_results = {}
 
     wave_dir = cache_dir / 'waveforms'
-    waveforms = np.load(wave_dir / 'waveforms.npz')
+    waveforms = dict(np.load(wave_dir / 'waveforms.npz'))
     qc_results['waveforms'] = waveforms
 
     truncation_dir = cache_dir / 'amp_truncation'
-    truncation = np.load(truncation_dir / 'truncation.npz')
-    present = np.load(truncation_dir / 'present.npz')
+    truncation = dict(np.load(truncation_dir / 'truncation.npz'))
+    present = dict(np.load(truncation_dir / 'present.npz'))
     qc_results['truncation'] = truncation
     qc_results['present'] = present
 
     refractory_dir = cache_dir / 'refractory'
-    refractory = np.load(refractory_dir / 'refractory.npz')
+    refractory = dict(np.load(refractory_dir / 'refractory.npz'))
     qc_results['refractory'] = refractory
 
     return qc_results
