@@ -25,5 +25,5 @@ dependencies = [
     "dash",
 ]
 
-[tool.setuptools]
-packages = ["SpikeSortingTools"]
+[tool.setuptools.packages.find]
+where = ["."]
