@@ -8,7 +8,7 @@ import pandas as pd
 from functools import cached_property
 
 class KilosortResults:
-    def __init__(self, directory):
+    def __init__(self, directory, fs=30000):
         if isinstance(directory, str):
             directory = Path(directory)
         assert isinstance(directory, Path), 'directory must be a string or Path object'
@@ -55,13 +55,16 @@ class KilosortResults:
             import json
             with open(spikeinterface_log_file, 'r') as f:
                 self.spikeinterface_log = json.load(f)
+
+        # Set sampling frequency
+        self.fs = fs
         
     @cached_property
     def spike_times(self):
         '''
         This now properly returns times if that info is available
         '''
-        spike_times = np.load(self.spike_times_file) / 30000
+        spike_times = np.load(self.spike_times_file) / self.fs
         return spike_times
     
     @cached_property
