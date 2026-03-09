@@ -1,5 +1,17 @@
-**/__pycache__/
-pipeline_results
-*.egg-info
-build
-.venv
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Build artifacts
+build/
+dist/
+
+# OS files
+.DS_Store
+
+# Project-specific
+pipeline_results/
