@@ -97,7 +97,33 @@ from tqdm import tqdm
 from scipy.stats import poisson, chi2
 import matplotlib.pyplot as plt
 
-from spike_utils.ccg import calc_local_firing_rate
+
+def calc_local_firing_rate(spike_times: np.ndarray, fr_est_dur: float = 1.0) -> float:
+    """Compute the local (autocorrelation-weighted) firing rate of a spike train.
+
+    For each spike i, count the number of spikes j > i with
+    spike_times[j] - spike_times[i] < fr_est_dur.  Summing those counts
+    and dividing by n_spikes * fr_est_dur gives the same ACG-density
+    estimate, which correctly tracks the *local* firing rate.
+
+    Parameters
+    ----------
+    spike_times : np.ndarray (n_spikes,)
+        Sorted spike times in seconds.
+    fr_est_dur : float
+        Half-window duration in seconds (default 1.0).
+
+    Returns
+    -------
+    firing_rate : float
+        Local firing rate in Hz.
+    """
+    n_spikes = len(spike_times)
+    if n_spikes == 0:
+        return 0.0
+    window_ends = np.searchsorted(spike_times, spike_times + fr_est_dur, side='right')
+    spikes_in_window = window_ends - np.arange(n_spikes) - 1
+    return float(np.sum(spikes_in_window) / (n_spikes * fr_est_dur))
 
 
 def refractory_violation_likelihood(
