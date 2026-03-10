@@ -23,7 +23,11 @@ dependencies = [
     "ipykernel>=6.29.5",
     "plotly",
     "dash",
+    "spike-utils @ git+https://github.com/ryan-ressmeyer/SpikeUtils.git",
 ]
+
+[tool.uv.sources]
+spike-utils = { workspace = true }
 
 [tool.setuptools.packages.find]
 where = ["."]

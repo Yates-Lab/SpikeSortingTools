@@ -1,291 +1,258 @@
+"""
+Sliding Refractory Period (RP) Quality Metric
+==============================================
+
+Author: Ryan A. Ressmeyer (with strong contribution from Claude Code)
+
+This module implements a statistical quality metric for evaluating whether spike-sorted
+neural units have contaminated refractory periods. A contaminated refractory period
+indicates that spikes from other neurons or noise are being mis-attributed to the unit.
+These methods were adapted from the "slidingRP" metric developed by Nick Steinmetz's lab.
+
+Algorithm
+---------
+
+**Step 1 — Spike Train Model**
+
+The recorded spike train is modelled as a mixture of two independent processes:
+
+- Base neuron spikes: N_b = (1 - C) * N_s spikes, which obey a true refractory period
+  and therefore produce no close spike pairs among themselves.
+- Contaminating spikes: N_c = C * N_s spikes, which are Poisson with no refractory
+  period, where C is the contamination proportion (0 = clean, 1 = fully contaminated).
+
+N_s is the total spike count and F_r is the total firing rate (Hz), so the recording
+duration is approximately D = N_s / F_r.
+
+**Step 2 — Observed Refractory Period Violations**
+
+For each tested refractory period duration τ_r, the observed violation count V_o(τ_r)
+is the cumulative sum of the one-sided autocorrelogram (ACG) from ref_acg_t_start up
+to τ_r:
+
+    V_o(τ_r) = Σ_{i=ref_acg_t_start}^{τ_r} n_ACG(i)
+
+The ACG is one-sided (only positive lags), so each close spike pair is counted once.
+ref_acg_t_start defaults to 0.25 ms to avoid bias from Kilosort's near-duplicate spike
+removal (which suppresses spikes within ~0.25 ms of each other).  The effective tested
+window is the adjusted refractory period τ_adj = τ_r − ref_acg_t_start.
+
+**Step 3 — Expected Violations Under a Given Contamination Level**
+
+For a one-sided ACG, two classes of spike pairs within [0, τ_adj] produce violations:
+
+  - Contam–base pairs (either time ordering): 2 * N_c * N_b * τ_adj / D
+  - Contam–contam pairs (unordered):         N_c * (N_c − 1) * τ_adj / D
+
+Base–base pairs contribute zero violations because the base neuron has its own
+refractory period.  Combining and substituting N_c = C*N_s, N_b = (1−C)*N_s:
+
+    V_e = [2 * N_c * N_b + N_c * (N_c − 1)] * τ_adj / D
+        ≈ C * (2 − C) * F_r * τ_adj * N_s
+
+The factor (2 − C) reduces to ≈ 2 for small C and captures the contam–contam
+self-interactions. This matches the formula in Llobet et al. (2022) and Steinmetz et al.
+
+**Step 4 — Poisson Likelihood**
+
+V_o is modelled as Poisson(V_e).  The likelihood of observing V_o or fewer violations
+given contamination C is:
+
+    P(X ≤ V_o | λ = V_e) = poisson.cdf(V_o, V_e)
+
+If the true contamination were C, and we observe very few violations, this probability
+will be small — the observations are unlikely under the hypothesis "contamination = C".
+
+**Step 5 — Minimum Rejected Contamination**
+
+For each cluster and each τ_r, find C_min: the smallest contamination for which the
+Poisson likelihood falls below (1 − confidence), i.e. we can reject the hypothesis that
+contamination is as large as C_min at the given confidence level.
+
+Two equivalent methods are provided:
+
+a) Binary search (compute_min_contam_props): bisects [0, max_contam_prop] to find C
+   where poisson.cdf(V_o, V_e(C)) = 1 − confidence.
+
+b) Analytical solution (compute_min_contam_props_analytical): uses the identity
+       poisson.cdf(r, λ) = 1 − chi2.cdf(2λ, 2*(r+1))
+   to solve for the critical Poisson rate in closed form:
+       λ_crit = chi2.ppf(confidence, 2*(V_o+1)) / 2
+   then inverts the quadratic  C * (2 − C) = k  (where k = λ_crit / (F_r * τ_adj * N_s))
+   via the closed-form root:
+       C = 1 − sqrt(1 − k)
+
+Functions
+---------
+refractory_violation_likelihood     : Poisson CDF likelihood for a contamination level.
+calc_rp_violations                  : Fast cumulative violation counts via k-th order ISIs.
+compute_min_contam_props_analytical : Analytical (exact) solution for minimum rejected contamination.
+compute_min_contam_props            : Binary search for minimum rejected contamination (legacy).
+compute_rvl_tensor                  : Full likelihood tensor over a contam × RP grid.
+plot_min_contam_prop                : Plot the minimum contamination curve vs. RP.
+plot_rvl                            : Plot the full RVL likelihood heatmap.
+"""
 import numpy as np
 from tqdm import tqdm
-from scipy.stats import poisson
+from scipy.stats import poisson, chi2
 import matplotlib.pyplot as plt
 
-def ensure_ndarray(x, dtype=None):
-    """
-    Ensures that the input is a numpy.ndarray. If it is a tensor, it is converted to a numpy array.
-
-    Parameters:
-    ----------
-    x : numpy.ndarray, torch.Tensor, int, float, list, or tuple
-        The input array or tensor.
-
-    Returns:
-    -------
-    numpy.ndarray
-        The input converted to a numpy array.
-    """
-    if isinstance(x, int) or isinstance(x, float):
-        x = [x]
-    if isinstance(x, list) or isinstance(x, tuple):
-        x = np.array(x)
-    if dtype is not None:
-        x = x.astype(dtype)
-    return x
+from spike_utils.ccg import calc_local_firing_rate
 
 
-def calc_ccgs(spike_times, bin_edges, spike_clusters = None, cids=None, progress=False):
-    """
-    Compute all pairwise cross-correlograms among the clusters appearing
-    in `spike_clusters`. Skips the correlating spikes with themselves, thus
-    the zero bin of the autocorrelogram is not the spike count.
-
-    Parameters
-    ----------
-
-    spike_times : array-like (n_spikes,)
-        Spike times in seconds.
-    bin_edges : array-like (n_bins + 1,)
-        The bin edges of the correlograms, in seconds.
-    spike_clusters : array-like (n_spikes,)
-        Spike-cluster mapping. If None, all spikes are assumed to belong to
-        a single cluster.
-    cluster_ids (optional): array-like (n_clusters,)
-        The list of *all* unique clusters, in any order. That order will be used
-        in the output array. If None, order the clusters by their appearance in
-        `spike_clusters`.
-
-    Returns
-    -------
-    correlograms : array
-        A `(n_clusters, n_clusters, n_bins)` array with all pairwise CCGs.
-
-    """
-    # Convert to NumPy arrays.
-    spike_times = ensure_ndarray(spike_times)
-    assert spike_times is not None
-    assert spike_times.ndim == 1
-
-    if spike_clusters is None:
-        spike_clusters = np.zeros(len(spike_times), dtype=np.int32)
-    spike_clusters = ensure_ndarray(spike_clusters, dtype=np.int32)
-    assert spike_clusters.ndim == 1
-    assert len(spike_times) == len(spike_clusters), "Spike times and spike clusters must have the same length."
-
-    if not np.all(np.diff(spike_times) >= 0):
-        print("Spike times are not sorted, sorting")
-        sort_inds = np.argsort(spike_times)
-        spike_times = spike_times[sort_inds]
-        spike_clusters = spike_clusters[sort_inds]
-
-    if cids is not None:
-        cids = ensure_ndarray(cids, dtype=np.int32)
-        cids_check = np.unique(spike_clusters)
-        assert np.all(np.in1d(cids, cids_check)), "Some clusters are not in spike_clusters."
-    else: 
-        cids = np.unique(spike_clusters)
-
-    bin_edges = ensure_ndarray(bin_edges)
-    assert bin_edges is not None
-    assert np.all(np.diff(bin_edges) > 0), "Bin edges must be monotonically increasing."
-    n_clusters = len(cids)
-    clusters2inds = np.zeros(cids.max() + 1, dtype=np.int32)
-    clusters2inds[cids] = np.arange(n_clusters)
-    spike_inds = clusters2inds[spike_clusters]
-
-    n_bins = len(bin_edges) - 1
-    ccgs = np.zeros((n_clusters, n_clusters, n_bins), dtype=np.int32)
-
-    max_bin = bin_edges[-1]
-    min_bin = bin_edges[0]
-    mean_bin = np.mean(np.diff(bin_edges))
-    digitize = lambda x: np.digitize(x, bin_edges) - 1
-    # digitize speed up if all bin spacings are the same
-    if np.allclose(np.diff(bin_edges), mean_bin):
-        #logger.debug("Using faster digitize")
-        digitize = lambda x: ((x - min_bin) / mean_bin).astype(np.int32)
-
-    # We will constrct the correlograms by comparing shifted versions of the
-    # spike trains. For each shift we will exclude all spike pairs that fall
-    # outside the correlogram window. Then, for the remaining spike pairs, we
-    # will compute the correlogram bin the pair belongs to and increment the
-    # correlogram at that bin. We will repeat this both forward and backward
-    # in time for all bins.
-
-    # This method is sped up by leveraging the fact that once the distance
-    # between two spikes is outside the bin edges, all subsequent spikes will
-    # also be outside the bin edges. So we can skip the rest of the shifts for
-    # that spike.
-    shift = 1
-    pos_mask = np.ones(len(spike_times), dtype=bool)
-    neg_mask = np.ones(len(spike_times), dtype=bool)
-
-    # progress bar shows the number of spikes completed
-    if progress:
-        pbar = tqdm(total = 1.0, desc="Calculating CCGs: Shift 1", position=0, leave=True)
-    while True:
-        pos_mask[-shift:] = False
-        pm = pos_mask[:-shift] # mask for positive shifts
-        has_pos = np.any(pm)
-
-        if has_pos:
-            # Calculate spike time differences and find spikes to be binned
-            pos_dts = spike_times[shift:][pm] - spike_times[:-shift][pm]
-            valid_pos = (min_bin < pos_dts) & (pos_dts < max_bin)
-
-            # Get the cluster indices for the valid spikes
-            pos_i = spike_inds[:-shift][pm][valid_pos]
-            pos_j = spike_inds[shift:][pm][valid_pos]
-
-            # Digitize the spike time differences to get the bin indices
-            pos_bins = digitize(pos_dts[valid_pos])
-
-
-            # Increment the correlogram at the bin indices
-            try: 
-                ravel_inds = np.ravel_multi_index((pos_i, pos_j, pos_bins), ccgs.shape)
-            except ValueError:
-                print(f'pos_i: {pos_i}')
-                print(f'pos_i min/max: {np.min(pos_i)}, {np.max(pos_i)}')
-                print(f'pos_j: {pos_j}')
-                print(f'pos_j min/max: {np.min(pos_j)}, {np.max(pos_j)}')
-                print(f'pos_bins: {pos_bins}')
-                print(f'pos_bins min/max: {np.min(pos_bins)}, {np.max(pos_bins)}')
-                print(f'ccgs.shape: {ccgs.shape}')
-            ravel_bin_counts = np.bincount(ravel_inds, minlength=ccgs.size)
-            ccgs += ravel_bin_counts.reshape(ccgs.shape)
-
-            # update the positive mask to exclude invalid spikes on next shift
-            pos_mask[:-shift][pm] = valid_pos
-
-        neg_mask[:shift] = False
-        nm = neg_mask[shift:] # mask for negative shifts
-        has_neg = np.any(nm)
-
-        if has_neg:
-            # Calculate spike time differences for negative shifts
-            neg_dts = spike_times[:-shift][nm] - spike_times[shift:][nm]
-            valid_neg = (min_bin < neg_dts) & (neg_dts < max_bin)
-
-            # Get the cluster indices for the valid spikes
-            neg_i = spike_inds[shift:][nm][valid_neg]
-            neg_j = spike_inds[:-shift][nm][valid_neg]
-
-            # Digitize the spike time differences to get the bin indices
-            neg_bins = digitize(neg_dts[valid_neg])
-
-            # Increment the correlogram at the bin indices
-            ravel_inds = np.ravel_multi_index((neg_i, neg_j, neg_bins), ccgs.shape)
-            ravel_bin_counts = np.bincount(ravel_inds, minlength=ccgs.size)
-            ccgs += ravel_bin_counts.reshape(ccgs.shape)
-            
-            # update the negative mask to exclude invalid spikes on next shift
-            neg_mask[shift:][nm] = valid_neg
-
-        # update the progress bar with number of spikes completed
-        if progress:
-            pbar.n = np.round(1 - (np.sum(pos_mask) + np.sum(neg_mask)) / len(spike_times) / 2, 3)
-            pbar.set_description(f"Calculating CCGs: Shift {shift}")
-
-        if not has_pos and not has_neg:
-            break
-
-        shift += 1
-
-    if progress:
-        pbar.close()
-
-    return ccgs
 def refractory_violation_likelihood(
-        n_violations, 
+        n_violations,
         contam_prop,
         refractory_period,
-        firing_rate, 
-        n_spikes, 
+        firing_rate,
+        n_spikes,
         ):
     '''
-    Calculate the likelihood of an observed number of refractory period violations under a poisson 
-    model of refractory violations. likelihood = P(X <= N_v | R_c, T_ref, F_r, N_s), where X is a 
-    poisson random variable with rate R_c * T_ref * F_r * N_s and N_v is the observed number of
-    refractory period violations in the cluster. R_c is a specified contamination rate,
-    T_ref is the refractory period, F_r is the firing rate of the cluster, and N_s is the number of
-    spikes in the cluster.
+    Calculate the likelihood of an observed number of refractory period violations
+    under a Poisson model that accounts for both contam-base and contam-contam
+    spike pair interactions.
+
+    The expected violation count is:
+
+        V_e = C * (2 - C) * F_r * τ * N_s
+
+    where C is the contamination proportion, F_r the firing rate, τ the refractory
+    period, and N_s the spike count. The factor (2 - C) arises from counting both
+    contam-base pairs (2*N_c*N_b) and contam-contam pairs (N_c*(N_c-1)).
 
     Parameters
     ----------
     n_violations : array_like
-        the observed number of violations
+        The observed number of violations.
     contam_prop : array_like
-        the contamination proportion to test (as a proportion of the firing rate)
+        The contamination proportion to test (fraction of total spikes).
     refractory_period : array_like
-        the refractory period in seconds
+        The refractory period in seconds.
     firing_rate : array_like
-        the firing rate of the cluster in Hz
+        The firing rate of the cluster in Hz.
     n_spikes : array_like
-        the number of spikes in the cluster
+        The number of spikes in the cluster.
 
     Returns
     -------
-    likelihood : float
-        the likelihood of the observing the number of violations or less if the cluster was contaminated at the rate specified
-
+    likelihood : float or array
+        P(X ≤ n_violations | Poisson(V_e)), the CDF probability.
     '''
-    # rate of contaminated spikes per second
-    contamination_firing_rate = firing_rate * contam_prop
-
-    # expected number of violations in the autocorrelogram
-    expected_violations = contamination_firing_rate * refractory_period * n_spikes
-
-    # likelihood of observing the number of violations or less
+    expected_violations = contam_prop * (2 - contam_prop) * firing_rate * refractory_period * n_spikes
     likelihood = poisson.cdf(n_violations, expected_violations)
-
     return likelihood
 
-def binary_search_rv_rate(n_violations, refractory_period, firing_rate, n_spikes, alpha=0.05, 
-                         max_contam_prop=1.0, tol=1e-6, max_iter=100):
+
+def calc_rp_violations(spike_times, refractory_periods, ref_acg_t_start):
     """
-    Perform binary search to find minimum contamination rate that can be rejected.
-    
+    Compute cumulative refractory period violation counts using k-th order ISIs.
+
+    Produces the same result as ``np.cumsum(calc_ccgs(st, np.r_[ref_acg_t_start,
+    refractory_periods]).squeeze())``, but without the 3-D histogram overhead of
+    calc_ccgs.  The ACG at lag τ equals the sum of all k-th order ISIs falling in
+    [0, τ]:
+
+        ACG(τ) = Σ_{k=1}^{∞} ISI_k(τ)
+
+    For a 10 ms window, k rarely exceeds 2–3, so the outer loop terminates
+    quickly.  Cumulative counts are then read off in O(n log n) via np.searchsorted
+    rather than by binning.
+
     Parameters
     ----------
-    n_violations : int
-        Observed number of violations
-    refractory_period : float
-        Refractory period in seconds
-    firing_rate : float
-        Firing rate in Hz
-    n_spikes : int
-        Number of spikes
-    alpha : float
-        Significance level
-    max_contam_prop : float
-        Maximum contamination proption to test (as proportion of firing rate)
-    max_iter : int
-        Maximum number of iterations
-        
+    spike_times : np.ndarray (n_spikes,)
+        Sorted spike times in seconds.
+    refractory_periods : np.ndarray (n_refractory_periods,)
+        Refractory period upper bounds in seconds (monotonically increasing).
+    ref_acg_t_start : float
+        Lower bound of the violation window in seconds.
+
     Returns
     -------
-    float
-        Minimum contamination rate that can be rejected under a poisson model of refractory violations.
+    n_violations : np.ndarray (n_refractory_periods,) int
+        Cumulative count of spike pairs with lag in [ref_acg_t_start, τ_r]
+        for each τ_r.
     """
-    left = 0
-    right = max_contam_prop
-    mid = 0 
-    for _ in range(max_iter):
-        mid = (left + right) / 2
-        likelihood = refractory_violation_likelihood(
-            n_violations, mid, refractory_period, firing_rate, n_spikes)
+    max_tau = refractory_periods[-1]
+    all_dts = []
 
-        if likelihood < alpha and likelihood > alpha - tol:
-            return mid
-        elif likelihood < alpha - tol:
-            right = mid
-        else:
-            left = mid
-    return mid
+    shift = 1
+    while True:
+        dts = spike_times[shift:] - spike_times[:-shift]
+        valid_dts = dts[dts <= max_tau]
+        if len(valid_dts) == 0:
+            break
+        all_dts.append(valid_dts)
+        shift += 1
 
-def compute_min_contam_props(spike_times, spike_clusters=None, cids=None,
+    if not all_dts:
+        return np.zeros(len(refractory_periods), dtype=np.intp)
+
+    all_dts = np.concatenate(all_dts)
+    valid_dts = all_dts[all_dts >= ref_acg_t_start]
+    valid_dts.sort()
+    return np.searchsorted(valid_dts, refractory_periods, side='right')
+
+
+def compute_min_contam_props_analytical(spike_times, spike_clusters=None, cids=None,
                        refractory_periods=np.exp(np.linspace(np.log(0.5e-3), np.log(10e-3), 100)),
                        max_contam_prop=1,
-                       fr_est_dur = 1,
-                       alpha = 0.05,
-                       ref_acg_t_start = .25e-3, 
-                       progress = False):
+                       fr_est_dur=1,
+                       confidence=0.95,
+                       ref_acg_t_start=.25e-3,
+                       progress=False,
+                       device='cpu'):
     '''
-    Compute the minimum contamination rate that can be rejected for each cluster in the dataset under a poisson model of refractory violations 
-    for a range of refractory periods.
+    Compute the minimum contamination proportion that can be rejected using the exact
+    analytical solution.
+
+    Derivation
+    ----------
+    We want the smallest contamination C such that the Poisson likelihood of the observed
+    violations V_o falls below (1 − confidence), i.e. find λ_crit satisfying:
+
+        P(Poisson(λ_crit) ≤ V_o) = 1 − confidence                             ... (1)
+
+    **Step 1 — Relate the Poisson CDF to the chi-squared CDF.**
+
+    The Poisson CDF can be written in terms of the regularised upper incomplete gamma
+    function Q(a, x) = Γ(a, x) / Γ(a):
+
+        P(Poisson(λ) ≤ r) = Q(r + 1, λ)                                       ... (2)
+
+    The chi-squared distribution with ν degrees of freedom is Gamma(ν/2, 2), so its CDF
+    is the regularised *lower* incomplete gamma function:
+
+        chi2.cdf(x, ν) = γ(ν/2, x/2) / Γ(ν/2)                                ... (3)
+
+    Because the upper and lower incomplete gamma functions sum to the complete gamma,
+    Q(a, x) = 1 − γ(a, x)/Γ(a).  Substituting a = r+1 and x = λ into (2) and comparing
+    with (3) at ν = 2*(r+1) and x = 2λ:
+
+        P(Poisson(λ) ≤ r) = Q(r+1, λ)
+                           = 1 − γ(r+1, λ) / Γ(r+1)
+                           = 1 − chi2.cdf(2λ, df=2*(r+1))                     ... (4)
+
+    **Step 2 — Solve for λ_crit analytically.**
+
+    Substituting (4) into (1):
+
+        1 − chi2.cdf(2λ_crit, df=2*(V_o+1)) = 1 − confidence
+        chi2.cdf(2λ_crit, df=2*(V_o+1))     = confidence
+        2λ_crit = chi2.ppf(confidence, df=2*(V_o+1))
+        λ_crit  = chi2.ppf(confidence, df=2*(V_o+1)) / 2                      ... (5)
+
+    **Step 3 — Invert the expected-violations formula to recover C.**
+
+    From the module docstring, V_e = C*(2−C)*F_r*τ_adj*N_s.  Setting V_e = λ_crit and
+    letting k = λ_crit / (F_r * τ_adj * N_s):
+
+        C*(2 − C) = k
+        C^2 − 2C + k = 0
+        C = 1 − sqrt(1 − k)       (smaller root, valid for C ∈ [0, 1])        ... (6)
+
+    When k > 1 (i.e. λ_crit implies contamination above 100%) the result is capped at
+    max_contam_prop via np.maximum(1 − k, 0) before taking the square root.
 
     Parameters
     ----------
@@ -298,38 +265,125 @@ def compute_min_contam_props(spike_times, spike_clusters=None, cids=None,
     refractory_periods : array-like (n_refractory_periods,)
         Refractory periods to test in seconds.
     max_contam_prop : float
-        Maximum contamination proportion to test (as a proportion of the firing rate).
+        Maximum contamination proportion to report.
     fr_est_dur : float
         Duration of the firing rate estimation window in seconds.
-    alpha : float
-        Significance level for the test.
+    confidence : float
+        Confidence level for the test (e.g. 0.95 means 95% confidence).
     ref_acg_t_start : float
-        Start time for the refractory period autocorrelogram in seconds. 
+        Start time for the refractory period autocorrelogram in seconds.
         (necessary because Kilosort removes "duplicate" spikes within a .25 ms window)
     progress : bool
         Show a progress bar.
+    device : str
+        'cpu' (default) or 'cuda' for GPU-accelerated firing rate computation.
 
     Returns
     -------
     min_contam_props : array (n_clusters, n_refractory_periods)
-        Minimum contamination rate that can be rejected under a poisson model of refractory violations.
+        Minimum contamination proportion that can be rejected.
     firing_rates : array (n_clusters,)
         Firing rates for each cluster.
-    
-
     '''
-    spike_times = ensure_ndarray(spike_times).squeeze()
+    spike_times = np.asarray(spike_times, dtype=np.float64).squeeze()
 
     if spike_clusters is None:
         spike_clusters = np.zeros(len(spike_times), dtype=np.int32)
-    spike_clusters = ensure_ndarray(spike_clusters, dtype=np.int32).squeeze()
+    spike_clusters = np.asarray(spike_clusters, dtype=np.int32).squeeze()
+    assert spike_clusters.ndim == 1
+    assert len(spike_times) == len(spike_clusters)
+
+    if cids is not None:
+        cids = np.asarray(cids, dtype=np.int32)
+    else:
+        cids = np.unique(spike_clusters)
+
+    adj_ref_periods = refractory_periods - ref_acg_t_start
+
+    firing_rates = np.zeros(len(cids))
+    min_contam_props = np.ones((len(cids), len(refractory_periods))) * max_contam_prop
+    for iC in tqdm(range(len(cids)), disable=not progress, desc="Calculating contamination (analytical)"):
+        cid = cids[iC]
+        st_clu = spike_times[spike_clusters == cid]
+        n_spikes = len(st_clu)
+        firing_rate = calc_local_firing_rate(st_clu, fr_est_dur)
+        firing_rates[iC] = firing_rate
+        n_violations = calc_rp_violations(st_clu, refractory_periods, ref_acg_t_start)
+
+        # Analytical solution: invert C*(2-C) * F_r * tau * N_s = lambda_critical
+        # lambda_critical = chi2.ppf(confidence, 2*(r+1)) / 2
+        # C*(2-C) = k  =>  C^2 - 2C + k = 0  =>  C = 1 - sqrt(1 - k)
+        lambda_critical = chi2.ppf(confidence, df=2 * (n_violations + 1)) / 2
+        k = lambda_critical / (firing_rate * adj_ref_periods * n_spikes)
+        contam = 1 - np.sqrt(np.maximum(1 - k, 0))
+        min_contam_props[iC] = np.minimum(contam, max_contam_prop)
+
+    return min_contam_props, firing_rates
+
+
+def compute_min_contam_props(spike_times, spike_clusters=None, cids=None,
+                       refractory_periods=np.exp(np.linspace(np.log(0.5e-3), np.log(10e-3), 100)),
+                       max_contam_prop=1,
+                       fr_est_dur=1,
+                       confidence=0.95,
+                       ref_acg_t_start=.25e-3,
+                       progress=False,
+                       tol=10e-4,
+                       max_iter=100,
+                       device='cpu'):
+    '''
+    Compute the minimum contamination proportion that can be rejected for each cluster
+    via binary search over a Poisson model of refractory period violations.
+
+    For most use cases, compute_min_contam_props_analytical is preferred (exact, faster).
+    This function is provided as a reference/validation implementation.
+
+    Parameters
+    ----------
+    spike_times : array-like (n_spikes,)
+        Spike times in seconds.
+    spike_clusters : array-like (n_spikes,)
+        Cluster IDs for each spike. If None, all spikes are assumed to be in the same cluster.
+    cids : array-like (n_clusters,)
+        Cluster IDs to test. Results returned in order of cids. If None, all clusters are tested.
+    refractory_periods : array-like (n_refractory_periods,)
+        Refractory periods to test in seconds.
+    max_contam_prop : float
+        Maximum contamination proportion to test.
+    fr_est_dur : float
+        Duration of the firing rate estimation window in seconds.
+    confidence : float
+        Confidence level for the test (e.g. 0.95 means 95% confidence).
+    ref_acg_t_start : float
+        Start time for the refractory period autocorrelogram in seconds.
+    progress : bool
+        Show a progress bar.
+    tol : float
+        Convergence tolerance for the binary search.
+    max_iter : int
+        Maximum number of binary search iterations.
+    device : str
+        'cpu' (default) or 'cuda' for GPU-accelerated firing rate computation.
+
+    Returns
+    -------
+    min_contam_props : array (n_clusters, n_refractory_periods)
+        Minimum contamination proportion that can be rejected.
+    firing_rates : array (n_clusters,)
+        Firing rates for each cluster.
+    '''
+    spike_times = np.asarray(spike_times, dtype=np.float64).squeeze()
+
+    if spike_clusters is None:
+        spike_clusters = np.zeros(len(spike_times), dtype=np.int32)
+    spike_clusters = np.asarray(spike_clusters, dtype=np.int32).squeeze()
     assert spike_clusters.ndim == 1
     assert len(spike_times) == len(spike_clusters), "Spike times and spike clusters must have the same length."
 
     if cids is not None:
-        cids = ensure_ndarray(cids, dtype=np.int32)
+        cids = np.asarray(cids, dtype=np.int32)
         cids_check = np.unique(spike_clusters)
-        assert np.all(np.in1d(cids, cids_check)), "Some clusters are not in spike_clusters."
+        assert np.all(np.isin(cids, cids_check)), "Some clusters are not in spike_clusters."
     else:
         cids = np.unique(spike_clusters)
 
@@ -337,57 +391,143 @@ def compute_min_contam_props(spike_times, spike_clusters=None, cids=None,
     assert np.all(np.diff(refractory_periods) > 0), "Refractory periods must be monotonic."
     assert max_contam_prop > 0, "Contamination test proportions must be positive."
 
-
     firing_rates = np.zeros(len(cids))
     min_contam_props = np.ones((len(cids), len(refractory_periods))) * max_contam_prop
     for iC in tqdm(range(len(cids)), disable=not progress, desc="Calculating contamination"):
         cid = cids[iC]
         st_clu = spike_times[spike_clusters == cid]
         n_spikes = len(st_clu)
-        firing_rate = calc_ccgs(st_clu, [0, fr_est_dur]).squeeze() / fr_est_dur / n_spikes
+        firing_rate = calc_local_firing_rate(st_clu, fr_est_dur)
         firing_rates[iC] = firing_rate
-        acg = calc_ccgs(st_clu, np.r_[ref_acg_t_start, refractory_periods]).squeeze()
-        n_violations = np.cumsum(acg) # number of refractory violations for each refractory period
+        n_violations = calc_rp_violations(st_clu, refractory_periods, ref_acg_t_start)
+        adj_ref_periods = refractory_periods - ref_acg_t_start
 
-        # For each refractory period, find minimum violation rate that can be rejected
-        for iR, n_viols in enumerate(n_violations):
-            ref_period = refractory_periods[iR] - ref_acg_t_start # adjust by the start time of the acg
-            min_contam_props[iC, iR] = binary_search_rv_rate(
-                n_viols, ref_period, firing_rate, n_spikes, 
-                alpha=alpha, max_contam_prop=max_contam_prop)
+        # Vectorized binary search across all refractory periods simultaneously
+        left = np.zeros(len(refractory_periods))
+        right = np.full(len(refractory_periods), float(max_contam_prop))
+        mid = np.empty(len(refractory_periods))
+        for _ in range(max_iter):
+            mid = (left + right) / 2
+            likelihood = refractory_violation_likelihood(
+                n_violations, mid, adj_ref_periods, firing_rate, n_spikes)
+            too_high = likelihood < (1 - confidence)
+            right = np.where(too_high, mid, right)
+            left = np.where(too_high, left, mid)
+            if np.max(right - left) < tol:
+                break
+        min_contam_props[iC] = mid
 
     return min_contam_props, firing_rates
 
-def plot_min_contam_prop(spike_times, min_contam_props, refractory_periods, 
-                         n_bins = 50, max_contam_prop=1, acg_t_start = .25e-3, axs=None):
+
+def compute_rvl_tensor(spike_times, spike_clusters=None, cids=None,
+                      refractory_periods=np.exp(np.linspace(np.log(0.5e-3), np.log(10e-3), 100)),
+                      contamination_test_proportions=np.exp(np.linspace(np.log(5e-3), np.log(.35), 50)),
+                      fr_est_dur=1,
+                      ref_acg_t_start=.25e-3,
+                      progress=False,
+                      device='cpu'):
     '''
-    Utility for plotting the minimum contamination proportion that can be rejected for each cluster in the dataset.
-    
+    Compute the likelihood of observing the number of refractory period violations
+    or fewer for many clusters, refractory periods, and test contamination rates.
+
     Parameters
     ----------
     spike_times : array-like (n_spikes,)
         Spike times in seconds.
-    min_contam_props : array (n_refractory_periods)
-        Minimum contamination rate that can be rejected under a poisson model of refractory violations.
+    spike_clusters : array-like (n_spikes,)
+        The cluster ids for each spike. If None, all spikes are assumed to belong to a single cluster.
+    cids : array-like (n_clusters,)
+        Cluster IDs to include. If None, all unique clusters are used.
+    refractory_periods : array-like (n_refrac,)
+        The refractory periods to test, in seconds.
+    contamination_test_proportions : array-like (n_contam,)
+        The contamination rates to test, as a proportion of the firing rate.
+    fr_est_dur : float
+        The duration in seconds over which to estimate the firing rate.
+    ref_acg_t_start : float
+        The start time in seconds for the refractory period autocorrelogram.
+    progress : bool
+        Show a progress bar.
+    device : str
+        'cpu' (default) or 'cuda' for GPU-accelerated firing rate computation.
+
+    Returns
+    -------
+    rvl_tensor : array
+        A (n_clusters, n_contam, n_refrac) array with Poisson CDF likelihoods.
+    '''
+    spike_times = np.asarray(spike_times, dtype=np.float64).squeeze()
+
+    if spike_clusters is None:
+        spike_clusters = np.zeros(len(spike_times), dtype=np.int32)
+    spike_clusters = np.asarray(spike_clusters, dtype=np.int32).squeeze()
+    assert spike_clusters.ndim == 1
+    assert len(spike_times) == len(spike_clusters), "Spike times and spike clusters must have the same length."
+
+    if cids is not None:
+        cids = np.asarray(cids, dtype=np.int32)
+        cids_check = np.unique(spike_clusters)
+        assert np.all(np.isin(cids, cids_check)), "Some clusters are not in spike_clusters."
+    else:
+        cids = np.unique(spike_clusters)
+
+    rvl_tensor = np.ones((len(cids), len(contamination_test_proportions), len(refractory_periods)))
+
+    iter_range = range(len(cids))
+    if progress:
+        iter_range = tqdm(iter_range, desc="Calculating RVL tensor", position=0, leave=True)
+    for iC in iter_range:
+        cid = cids[iC]
+        cluster_spikes = spike_times[spike_clusters == cid]
+        n_spikes = len(cluster_spikes)
+        firing_rate = calc_local_firing_rate(cluster_spikes, fr_est_dur)
+        refractory_violations = calc_rp_violations(cluster_spikes, refractory_periods, ref_acg_t_start)
+
+        rvl_tensor[iC] = refractory_violation_likelihood(
+                            refractory_violations[None,:],
+                            contamination_test_proportions[:,None],
+                            refractory_periods[None,:] - ref_acg_t_start,
+                            firing_rate,
+                            n_spikes)
+
+    return rvl_tensor
+
+
+def plot_min_contam_prop(spike_times, min_contam_props, refractory_periods,
+                         n_bins=50, max_contam_prop=1, acg_t_start=.25e-3, axs=None):
+    '''
+    Plot the minimum contamination proportion that can be rejected overlaid on the ISI distribution.
+
+    Parameters
+    ----------
+    spike_times : array-like (n_spikes,)
+        Spike times in seconds.
+    min_contam_props : array (n_refractory_periods,)
+        Minimum contamination rate that can be rejected.
     refractory_periods : array-like (n_refractory_periods,)
-        Refractory periods to test in seconds.
+        Refractory periods tested, in seconds.
+    n_bins : int
+        Number of ISI histogram bins.
+    max_contam_prop : float
+        Y-axis upper limit for contamination proportion.
+    acg_t_start : float
+        ACG start time in seconds (for x-axis lower limit).
+    axs : matplotlib.axes.Axes, optional
+        Axes to plot on. If None, creates a new figure.
 
     Returns
     -------
     fig : matplotlib.figure.Figure
-        The figure object.
-    axs : list of matplotlib.axes.Axes (2,)
-        The axes objects.
-
+    axs : matplotlib.axes.Axes
     '''
-
     isis = np.diff(spike_times) * 1000
     max_refrac = refractory_periods.max() * 1000
     min_isi = acg_t_start * 1000
     min_prop = min_contam_props.min()
 
     if axs is None:
-        fig, axs = plt.subplots(1,1)
+        fig, axs = plt.subplots(1, 1)
     else:
         fig = axs.get_figure()
     bins = np.linspace(min_isi, max_refrac, n_bins)
@@ -407,78 +547,29 @@ def plot_min_contam_prop(spike_times, min_contam_props, refractory_periods,
 
     return fig, axs
 
-# Depricated code from Nick Steinmetz's lab (Sliding RP violations)
-# https://github.com/SteinmetzLab/slidingRefractory/blob/1.0.0/python/slidingRP/metrics.py
-def compute_rvl_tensor(spike_times, spike_clusters=None, cids=None,
-                      refractory_periods=np.exp(np.linspace(np.log(0.5e-3), np.log(10e-3), 100)),
-                      contamination_test_proportions=np.exp(np.linspace(np.log(5e-3), np.log(.35), 50)),
-                      fr_est_dur = 1,
-                      ref_acg_t_start = .25e-3, 
-                      progress = False):
+
+def plot_rvl(cluster_spikes, likelihoods, refractory_periods, contamination_test_proportions, likelihood_threshold=0.05):
     '''
-    Compute the likelihood of observing the number of refractory period violations or fewer for many clusters, refractory periods, and test comtamination rates.
+    Plot the full RVL likelihood heatmap with ISI distribution and min contamination curve.
 
     Parameters
     ----------
-    spike_times : array-like (n_spikes,)
-        Spike times in seconds.
-    spike_clusters : array-like (n_spikes,)
-        The cluster ids for each spike. If None, all spikes are assumed to belong to a single cluster.
-    cids : array-like (n_clusters,)
-        The list of *all* unique clusters, in any order. That order will be used in the output array. If None, order the clusters by their appearance in `spike_clusters`.
+    cluster_spikes : array-like (n_spikes,)
+        Spike times for a single cluster.
+    likelihoods : array (n_contam, n_refrac)
+        Likelihood tensor for a single cluster.
     refractory_periods : array-like (n_refrac,)
-        The refractory periods to test, in seconds.
+        Refractory periods tested, in seconds.
     contamination_test_proportions : array-like (n_contam,)
-        The contamination rates to test, as a proportion of the firing rate.
-    fr_est_dur : float
-        The duration in seconds over which to estimate the firing rate. 
-    ref_acg_t_start : float. Default is .25e-3
-        The start time in seconds for the refractory period autocorrelogram. 
-        Necessary for Kilosort4, which removes duplicate spikes in a .25 ms window, which negatively biases the refractory likelihood estimates.
+        Contamination proportions tested.
+    likelihood_threshold : float
+        Threshold for rejecting contamination hypothesis.
 
     Returns
     -------
-    rvl_tensor : array
-        A `(n_clusters, n_refrac, n_contam)` array with the likelihood of observing the number of refractory period violations or less if the cluster was contaminated at the rate specified.
+    fig : matplotlib.figure.Figure
+    axs : array of matplotlib.axes.Axes (3,)
     '''
-    spike_times = ensure_ndarray(spike_times).squeeze()
-
-    if spike_clusters is None:
-        spike_clusters = np.zeros(len(spike_times), dtype=np.int32)
-    spike_clusters = ensure_ndarray(spike_clusters, dtype=np.int32).squeeze()
-    assert spike_clusters.ndim == 1
-    assert len(spike_times) == len(spike_clusters), "Spike times and spike clusters must have the same length."
-
-    if cids is not None:
-        cids = ensure_ndarray(cids, dtype=np.int32)
-        cids_check = np.unique(spike_clusters)
-        assert np.all(np.in1d(cids, cids_check)), "Some clusters are not in spike_clusters."
-    else:
-        cids = np.unique(spike_clusters)
-
-    rvl_tensor = np.ones((len(cids), len(contamination_test_proportions), len(refractory_periods)))
-
-    iter = range(len(cids))
-    if progress:
-        iter = tqdm(iter, desc="Calculating RVL tensor", position=0, leave=True)
-    for iC in iter:
-        cid = cids[iC]
-        cluster_spikes = spike_times[spike_clusters == cid]
-        n_spikes = len(cluster_spikes)
-        firing_rate = calc_ccgs(cluster_spikes, [0, fr_est_dur]).squeeze() / fr_est_dur / n_spikes
-        acg = calc_ccgs(cluster_spikes, np.r_[ref_acg_t_start, refractory_periods]).squeeze()
-        refractory_violations = np.cumsum(acg)
-
-        rvl_tensor[iC] = refractory_violation_likelihood(
-                            refractory_violations[None,:], 
-                            contamination_test_proportions[:,None],
-                            refractory_periods[None,:] - ref_acg_t_start, 
-                            firing_rate, 
-                            n_spikes)
-
-    return rvl_tensor
-
-def plot_rvl(cluster_spikes, likelihoods, refractory_periods, contamination_test_proportions, likelihood_threshold=0.05):
     min_refrac, max_refrac = refractory_periods.min(), refractory_periods.max()
     min_contam, max_contam = contamination_test_proportions.min(), contamination_test_proportions.max()
 
@@ -492,7 +583,7 @@ def plot_rvl(cluster_spikes, likelihoods, refractory_periods, contamination_test
 
     fig, axs = plt.subplots(3, 1, figsize=(5, 12), height_ratios=[1, 1.5, 1])
     axs[0].hist(isis * 1000, bins=np.arange(0, max_refrac*1000, .33))
-    axs[0].set_title(f'ISI distribution')
+    axs[0].set_title('ISI distribution')
     axs[0].set_ylabel('Count')
     axs[0].set_xlabel('ISI (ms)')
     axs[0].set_xlim([0, max_refrac*1000])
@@ -507,7 +598,7 @@ def plot_rvl(cluster_spikes, likelihoods, refractory_periods, contamination_test
     axs[1].set_xlim(extent[:2])
     axs[1].set_ylim(extent[2:])
     fig.colorbar(im, ax=axs[1], orientation='horizontal', label='Likelihood')
-    axs[1].set_title(f'Likelihood of observed refractory period violations')
+    axs[1].set_title('Likelihood of observed refractory period violations')
     axs[1].set_xlabel('Refractory period (ms)')
     axs[1].set_ylabel('Contamination rate')
 
@@ -520,5 +611,3 @@ def plot_rvl(cluster_spikes, likelihoods, refractory_periods, contamination_test
 
     plt.tight_layout()
     return fig, axs
-
-
